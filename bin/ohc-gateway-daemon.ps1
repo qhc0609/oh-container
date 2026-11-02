@@ -93,11 +93,13 @@ if ($Status) {
 
 # ---------------------------------------------------------------- hdc
 if (-not $Hdc) {
+    # 先看自己旁边（离线套件会把 hdc.exe 一起放进来），再看 SDK 常见位置
     foreach ($c in @(
+        (Join-Path $PSScriptRoot 'hdc.exe'),
         'C:\Tools\HarmonyOS\toolchains\hdc.exe',
         "$env:LOCALAPPDATA\Huawei\Sdk\openharmony\toolchains\hdc.exe",
         "$env:ProgramFiles\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe"
-    )) { if (Test-Path $c) { $Hdc = $c; break } }
+    )) { if ($c -and (Test-Path $c)) { $Hdc = $c; break } }
     if (-not $Hdc) {
         $cmd = Get-Command hdc -ErrorAction SilentlyContinue
         if ($cmd) { $Hdc = $cmd.Source }
@@ -123,9 +125,17 @@ function Get-DeviceList {
 }
 
 function Get-GwPid {
+    # 不要在设备上跑 `ps -ef | grep xxx`：这台手机的 toybox grep 在管道里
+    # 会间歇性报 "grep: (standard input): Invalid argument"，输出被截断。
+    # 改成把 ps 整段拿回来在 PC 侧过滤，稳定得多。
     try {
-        $o = (& $Hdc shell 'ps -ef 2>/dev/null | grep ohc-gw.mjs | grep -v grep' 2>&1) -join ' '
-        if ($o -match '(\d+)\s') { return $Matches[1] }
+        $lines = & $Hdc shell "ps -ef" 2>&1
+        foreach ($l in $lines) {
+            $s = "$l"
+            if ($s -match 'ohc-gw\.mjs' -and $s -notmatch 'grep') {
+                if ($s -match '^\S+\s+(\d+)') { return $Matches[1] }
+            }
+        }
     } catch { }
     return ''
 }
@@ -171,6 +181,12 @@ function Add-Forward {
         Remove-Forward
         Start-Sleep -Milliseconds 800
     }
+    return $false
+}
+
+function Repair-Forward {
+    Remove-Forward
+    if (Add-Forward) { Write-Log "端口映射已重建 tcp:$Port"; return $true }
     return $false
 }
 
@@ -227,35 +243,39 @@ Write-Log "守护进程启动，hdc=$Hdc，轮询 ${PollSeconds}s，网关脚本
 $wasUp = $false
 while ($true) {
     try {
-        $dev = Get-DeviceList
-        $hasDev = $dev.Count -gt 0
-
-        if ($hasDev) {
-            $up = (Get-GwPid) -ne ''
-            # 三条都要过：进程在、ruler 在、本机端口真的能连上。
-            # 只看前两条会漏掉「ruler 在但没监听」这种假活状态。
-            $live = $up -and (Test-Forward) -and (Test-GatewayPort)
-
-            if (-not $live) {
-                if ($wasUp) { Write-Log "检测到网关/映射失效（进程=$up），重建" }
-                else { Write-Log "检测到设备 $($dev -join ',')，开始准备网关" }
-                if (Start-Gateway) {
-                    if (-not $wasUp) { Write-Log '就绪，VS Code 现在可以用了' }
-                    $wasUp = $true
-                } else {
-                    # 建不起来就别每 5 秒硬撞一次，缓一轮
-                    Write-Log '本轮没建起来，10 秒后重试'
-                    Start-Sleep -Seconds 10
-                }
-            } elseif (-not $wasUp) {
-                Write-Log '网关已在运行，无需重复启动'
-                $wasUp = $true
-            }
+        # 先做一个纯本地的探测：连一下 127.0.0.1:18080。
+        # 通了就什么都不做 —— 这一步不碰 hdc，所以健康状态下守护进程
+        # 对 USB 通道是零打扰的（以前每 5 秒跑一次 hdc shell ps，
+        # 会和正在进行的对话抢 hdc 通道，偶发把请求打断）。
+        if (Test-GatewayPort) {
+            if (-not $wasUp) { Write-Log '端口已连通，无需动作'; $wasUp = $true }
         } else {
-            if ($wasUp) {
-                Write-Log '设备已断开，收掉网关'
-                Stop-Gateway
-                $wasUp = $false
+            $dev = Get-DeviceList
+            if ($dev.Count -eq 0) {
+                if ($wasUp) { Write-Log '设备已断开（网关进程留在手机里，重插即可复用）'; $wasUp = $false }
+            } else {
+                $gwPid = Get-GwPid
+                if ($gwPid) {
+                    # 进程还活着，说明只是 USB 转发这一层掉了。
+                    # 只重建映射，绝不杀 node —— 杀进程会让正在跑的对话直接断掉。
+                    Write-Log "端口不通但网关进程在（pid=$gwPid），只重建映射"
+                    if (Repair-Forward) {
+                        $wasUp = $true
+                    } else {
+                        Write-Log '只重建映射不行，重启网关'
+                        if (Start-Gateway) { $wasUp = $true } else { Start-Sleep -Seconds 10 }
+                    }
+                } else {
+                    Write-Log "检测到设备 $($dev -join ',')，启动网关"
+                    if (Start-Gateway) {
+                        if (-not $wasUp) { Write-Log '就绪，VS Code 现在可以用了' }
+                        $wasUp = $true
+                    } else {
+                        # 建不起来就别每轮硬撞，缓一轮
+                        Write-Log '本轮没建起来，10 秒后重试'
+                        Start-Sleep -Seconds 10
+                    }
+                }
             }
         }
     } catch {

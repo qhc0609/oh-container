@@ -105,6 +105,16 @@ const server = http.createServer((req, res) => {
 
         const u = new URL(UPSTREAM + req.url);
 
+        // DeepSeek 的 /v1/completions（FIM / 自动补全）是"beta 专属"接口，
+        // 走 /v1 会直接 400：
+        //   "completions api is only available when using beta api
+        //    (set base_url=https://api.deepseek.com/beta)"
+        // Continue 的内联补全就会打这个接口，所以这里改写到 /beta。
+        let upPath = u.pathname + u.search;
+        if (/^\/(v1\/)?(fim\/)?completions$/.test(u.pathname)) {
+            upPath = '/beta/completions' + u.search;
+        }
+
         const headers = {
             'content-type': req.headers['content-type'] || 'application/json',
             'accept': req.headers['accept'] || 'application/json',
@@ -113,7 +123,7 @@ const server = http.createServer((req, res) => {
         };
 
         const up = https.request(
-            { hostname: u.hostname, port: 443, path: u.pathname + u.search, method: req.method, headers },
+            { hostname: u.hostname, port: 443, path: upPath, method: req.method, headers },
             (ur) => {
                 const status = ur.statusCode || 502;
                 if (status >= 400) {

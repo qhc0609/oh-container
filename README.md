@@ -825,3 +825,168 @@ Continue 的 `apiKey` 是假的（`sk-ohc-gateway`），**网关只认真 Key �
 所以这份 `config.yaml` 就算被同步到云端、发给同事，也不泄露任何东西。
 
 
+
+---
+
+## 13. 给「不能上网的第二台电脑」做离线安装包
+
+前面第 11、12 章是给**能上网**的 PC 配 VS Code。但真实场景里更常见的是：
+另有一台机器连不上外网，装不了扩展市场里的 Continue，也拿不到 `hdc.exe`。
+这个套件就是为它准备的——**一个 zip，拷过去双击，什么都不用手工填**。
+
+### 它解决的两个硬问题
+
+**1. 离线装扩展**
+
+VS Code 装扩展有两条路：扩展市场（要联网）、`--install-extension xxx.vsix`（不要联网）。
+后者要求 zip 里有 `extension.vsixmanifest` 和 `[Content_Types].xml`，而**已经装好的扩展目录里没有这两个文件**——
+它们是安装时被剥掉的。所以 `scripts/build-vsix.py` 按 VSX 规范把它们补出来：
+
+```python
+z.writestr('[Content_Types].xml', CONTENT_TYPES)
+z.writestr('extension.vsixmanifest', manifest)   # Id/Publisher/Version 从 package.json 取
+# 然后整个扩展目录塞进 extension/
+```
+
+实测 `code --install-extension continue.vsix` → `successfully installed`，
+装出来是 `continue.continue-2.0.0`（不带平台后缀，因为打的是通用包）。
+
+**2. 目标机器没有 hdc**
+
+`hdc.exe` 不需要装 SDK，直接拷就能跑（实测：只拷 `hdc.exe`、不拷 `libusb_shared.dll`
+也能 `list targets`）。所以套件里带了 5.5 MB 的 `hdc.exe`，不污染系统 PATH。
+
+### 包的结构
+
+```
+ohc-vscode-kit/
+├── run.cmd                  双击入口（带 chcp 65001 + ExecutionPolicy Bypass）
+├── install.ps1              主安装脚本
+├── 使用说明.txt
+└── payload/
+    ├── continue.vsix        70 MB，离线扩展包
+    ├── continue-config.yaml 模型配置模板
+    ├── hdc.exe              5.5 MB，不用装 SDK
+    ├── libusb_shared.dll
+    ├── ohc-gw.mjs           网关（推到手机里跑）
+    └── ohc-gateway-daemon.ps1
+```
+
+生成（三个大文件不进 git，所以克隆仓库后要跑一遍）：
+
+```bash
+bash scripts/build-kit.sh          # -> dist/ohc-vscode-kit.zip   72 MB
+```
+
+### 目标机器上发生了什么
+
+`install.ps1` 十步，全自动：
+
+| 步骤 | 干什么 |
+|---|---|
+| 1 | 找 VS Code：PATH → 注册表 `App Paths\Code.exe` → 常见路径 → 扫所有盘符 |
+| 2 | 找 hdc：payload 自带的优先 |
+| 3 | 等设备（最多 30 秒），拿不到就提示驱动 / 改用 USB 网络共享 |
+| 4 | 确认手机里容器在、网关进程在；不在就推 `ohc-gw.mjs` 并拉起来 |
+| 5 | 建 `hdc fport tcp:18080 tcp:18080`，并且**真去 TCP connect 一次**验证 |
+| 6 | 离线装 `continue.vsix`（已装则跳过） |
+| 7 | 写 `~/.continue/config.yaml`，旧配置先备份成 `.bak-时间戳` |
+| 8 | 发一条真实对话，确认模型能回话 |
+| 9 | 装开机自启的守护进程（文件放 `%LOCALAPPDATA%\ohc-gateway\`） |
+| 10 | 打印「按 Ctrl+L」 |
+
+体检模式不改任何东西，排查时先跑它（`-Check`）。
+
+### 两条通路
+
+默认走 USB 端口转发（PC 上零外网流量）。如果目标机器缺 HarmonyOS USB 驱动、
+`hdc list targets` 一直是空的，还有第二条路：手机打开 **USB 网络共享**，
+PC 会拿到一个局域网地址，然后加 `-Tether` 参数跑安装脚本。
+
+它会从默认路由和本机网段里挨个探 `/healthz`，找到那个回 `ohc-gw ok` 的地址就用它。
+网关本来就 `listen(PORT, '0.0.0.0')`，所以这条路是现成的。
+
+### 打包时踩到的坑
+
+**1. `Write-Host ""` 打不出空行**
+
+输出被重定向 / 走管道时，空字符串的 `Write-Host` 会被吞掉，下一行直接粘上来：
+
+```
+    [OK] 版本 1.144.0==> 定位 hdc
+```
+
+改成 `Write-Host " "`（一个空格）就稳定了。四个 PC 侧脚本都踩过这个。
+
+**2. `Invoke-WebRequest` 的进度条会糊屏**
+
+自检里调它时，进度条会把已经打出来的中文覆盖成乱码：
+
+```
+ohc VS Code 离离线线套套件件 —— 让让这这台台电电脑脑...
+```
+
+开头加 `$ProgressPreference = 'SilentlyContinue'` 就好。
+
+**3. 设备上不要用 `ps -ef | grep xxx`**
+
+这台手机的 toybox `grep` 在管道里会间歇性报
+`grep: (standard input): Invalid argument`，输出被截断。
+改成把 `ps -ef` 整段拿回 PC 侧过滤，稳定得多。
+
+**4. 日志路径分两套**
+
+`/work/ohc-gw.log` 只存在于容器里；从宿主机 `hdc shell` 看要用
+`/data/ohc/workspace/ohc-gw.log`。混用会得到 `No such file or directory`。
+
+### 顺带修掉的两个真 bug
+
+**`/v1/completions` 一直 400**
+
+网关日志里挖出来的：
+
+```
+UPSTREAM 400: completions api is only available when using beta api
+              (set base_url="https://api.deepseek.com/beta")
+POST /v1/completions -> 400 153ms
+```
+
+Continue 的内联补全（FIM）打的是 `/v1/completions`，DeepSeek 对这个接口只认 `/beta`。
+网关里加了一条改写：
+
+```js
+if (/^\/(v1\/)?(fim\/)?completions$/.test(u.pathname)) {
+    upPath = '/beta/completions' + u.search;
+}
+```
+
+修完实测能正常补全：`def add(a, b):` → `return a + b`。
+
+**守护进程会打断正在跑的对话**
+
+原来的逻辑是「进程在 + ruler 在 + 端口能连」三条全过才算活，
+任一不满足就重启网关——而重启第一步就是 `kill` 掉 node。
+结果是：USB 转发抖一下，正在生成的回答直接断，Continue 弹
+「Error handling model response」，看着像模型坏了。
+
+改成两级：
+
+- 端口不通但 node 还活着 → **只重建映射，不碰进程**（实测 pid 不变，10 秒内恢复）
+- node 也没了 → 才重启网关
+
+同时把健康检查换成「先做纯本地 TCP 探测」：端口通了就什么都不做，
+**不跑任何 hdc 命令**。以前每 5 秒查一次 `ps`，会和正在进行的对话抢通道。
+
+### 实测记录
+
+```
+体检（从任意解压位置）      -> 找到 VS Code 1.144.0 / payload 里的 hdc / 设备 03516892320539
+离线装扩展                  -> Extension 'continue.vsix' was successfully installed.
+完整安装                    -> 容器在 / 网关 pid=14781 / fport OK / healthz OK
+                            -> 模型回话: [收到] tokens=37
+拆掉映射（模拟掉线）        -> "端口不通但网关进程在（pid=14781），只重建映射"
+                            -> 端口 10 秒内恢复，pid 没变
+hdc kill 后重连             -> "设备已断开" -> "端口不通但网关进程在（pid=14781）" -> 重建
+手机上的包                  -> /storage/media/100/local/files/Download/ohc-vscode-kit.zip
+                              75,670,233 字节（Download 目录可写，MTP 能看到）
+```

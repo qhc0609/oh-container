@@ -1,0 +1,101 @@
+﻿==============================================================
+  ohc VS Code 离线套件
+  让一台「不能上网」的电脑，用手机里的 DeepSeek 跑 VS Code
+==============================================================
+
+【它是干什么的】
+
+有些电脑连不上外网（内网机、涉密机、临时工位），但 USB 口是通的，
+手机有流量。这个套件就是把手机变成中转站：
+
+  VS Code ──http──▶ 127.0.0.1:18080 ──USB──▶ 手机里的网关 ──▶ DeepSeek
+
+电脑上不会有任何一包外网流量，走的是 USB 上的端口转发。
+所以防火墙、代理、上网白名单全部绕开，也不需要给这台电脑配任何网络。
+
+
+【怎么用】
+
+第 1 步  把手机插到这台电脑的 USB 口上
+         （手机上如果有「USB 调试」开关，要打开）
+
+第 2 步  把整个文件夹拷到这台电脑上，解压到任意位置
+         注意：要整个文件夹，不能只拷 install.ps1
+
+第 3 步  双击 run.cmd
+         会弹出一个黑窗口自己跑，大概 30 秒到 2 分钟
+         看到「装完了」就好了
+
+第 4 步  打开 VS Code，按 Ctrl+L
+
+就这样。以后每次开机都不用管了，手机插上就自动就绪。
+
+
+【用的时候注意一件事】
+
+Continue 要「有工作区」才能干活（写文件、改代码）。
+所以别停在 VS Code 的空窗口，先：
+   文件 -> 打开文件夹 -> 选一个目录
+
+否则它聊天能回话，但让它改文件会报错。
+
+
+【它到底装了什么】
+
+  1. Continue 扩展        —— VS Code 的聊天面板（离线装，不联网）
+  2. ~/.continue/config.yaml —— 模型配置，指向本机 18080 网关
+  3. %LOCALAPPDATA%\ohc-gateway\ —— 守护进程，开机自启，5 秒巡检一次
+  4. hdc.exe              —— 装在套件目录里，不污染系统，不装 SDK
+
+守护进程干的事：手机插上就自动建好端口转发，拔掉就收干净。
+所以「下次连接后立即能用」是自动的，不需要你记得跑什么命令。
+
+
+【出问题了怎么办】
+
+先跑体检（只看不改）：
+
+    powershell -ExecutionPolicy Bypass -File install.ps1 -Check
+
+看手机那侧的请求日志（每发一句话就多一行）：
+
+    hdc shell "tail -20 /data/ohc/workspace/ohc-gw.log"
+
+  - 有 POST ... -> 200       通道正常，问题在 VS Code 那一侧
+  - 什么都没有               请求没到手机，通道断了
+  - CLIENT ABORTED           客户端自己掐断的
+
+常见的几种：
+
+  「找不到 VS Code 的命令行入口」
+      VS Code 装了但没加进 PATH。用这一行指定扩展目录：
+      powershell -ExecutionPolicy Bypass -File install.ps1 -ExtensionsDir "%USERPROFILE%\.vscode\extensions"
+
+  「hdc 看不到设备」
+      1) 换个 USB 口，别用只能充电的线
+      2) 手机上打开 USB 调试
+      3) 这台电脑缺 HarmonyOS USB 驱动（第一次连才会遇到）
+      绕开办法：手机打开「USB 网络共享」，然后跑
+      powershell -ExecutionPolicy Bypass -File install.ps1 -Tether
+
+  「网关启动失败」
+      手机里没有 DeepSeek Key。在手机 shell 里跑：
+      /data/ohc/bin/ohc-setkey sk-你的key
+
+  VS Code 里 Ctrl+L 没反应
+      这个窗口是在装扩展之前开的。按 Ctrl+Shift+P -> Reload Window
+
+
+【不想要了】
+
+    powershell -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\ohc-gateway\ohc-gateway-daemon.ps1" -Uninstall
+
+再把 ~/.continue 和 VS Code 里的 Continue 扩展删掉即可。
+手机那侧不受影响。
+
+
+【为什么 Key 不在这台电脑上】
+
+Continue 配置里那个 apiKey 是假的（sk-ohc-gateway）。
+真 Key 只在手机里，600 权限。网关替你把 Authorization 换成真 Key。
+所以这份配置文件被同步到云端、发给同事，都不泄露东西。

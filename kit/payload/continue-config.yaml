@@ -1,0 +1,39 @@
+name: Main Config
+version: 1.0.0
+schema: v1
+
+# 模型指向本机的 ohc 网关，由手机上的容器转发到 api.deepseek.com。
+# 网关的启停由 %LOCALAPPDATA%\ohc-gateway\ohc-gateway-daemon.ps1 负责，
+# 手机插上就自动建好端口转发，不用手动跑命令。
+#
+# 这里的 apiKey 随便填个非空值即可，网关会替换成手机里的真 Key。
+models:
+  - name: DeepSeek V4.1 Flash（手机中转）
+    provider: openai
+    model: deepseek-flash
+    apiBase: http://127.0.0.1:18080/v1
+    apiKey: sk-ohc-gateway
+    contextLength: 65536
+    roles:
+      - chat
+      - edit
+      - apply
+    capabilities:
+      - tool_use
+    defaultCompletionOptions:
+      maxTokens: 8192
+
+  - name: DeepSeek V4 Pro（手机中转）
+    provider: openai
+    model: deepseek-v4-pro
+    apiBase: http://127.0.0.1:18080/v1
+    apiKey: sk-ohc-gateway
+    contextLength: 65536
+    roles:
+      - chat
+      - edit
+      - apply
+    capabilities:
+      - tool_use
+    defaultCompletionOptions:
+      maxTokens: 8192

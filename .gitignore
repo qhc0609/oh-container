@@ -31,3 +31,9 @@ __pycache__/
 # 临时文件（探测脚本、API 推送中间产物）
 .tmp-*
 *.tmp
+
+# 离线套件的成品：体积大，跑 scripts/build-kit.sh 现场生成
+dist/
+kit/payload/continue.vsix
+kit/payload/hdc.exe
+kit/payload/libusb_shared.dll
