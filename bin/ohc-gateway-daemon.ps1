@@ -182,6 +182,17 @@ if (-not $Hdc -or -not (Test-Path $Hdc)) {
     return
 }
 
+# 单实例：计划任务被重复触发、或者手动又跑一次时，不要出现两个守护进程
+# 同时去起网关（会起出两个 node，抢同一个 18080）。
+# -Once 是排查用的单轮模式，不参与抢锁，否则守护进程在跑时就查不了。
+if (-not $Once) {
+    $mutex = New-Object System.Threading.Mutex($false, 'Global\ohc-gateway-daemon')
+    if (-not $mutex.WaitOne(0)) {
+        Write-Log '已有一个守护进程在跑，本次退出'
+        return
+    }
+}
+
 Write-Log "守护进程启动，hdc=$Hdc，轮询 ${PollSeconds}s，网关脚本=$GwPath"
 
 $wasUp = $false
