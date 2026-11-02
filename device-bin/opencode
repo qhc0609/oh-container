@@ -23,10 +23,13 @@ if [ "$1" = "run" ]; then
     exec /data/ohc/bin/ohc run claude -- opencode "$@" < /dev/null
 fi
 
-# 交互式 TUI：放进 tmux，历史由 tmux 保存（hdc 在 Windows 控制台上自己模拟
-# 固定尺寸屏幕，超屏的行不会进终端回滚区，详见 etc/ohc-tmux 顶部注释）
-if [ "${OHC_NO_TMUX:-0}" = "1" ] || [ ! -x /data/ohc/rootfs/claude/usr/local/bin/ohc-tmux ]; then
-    exec /data/ohc/bin/ohc run claude -- opencode "$@"
+# 交互式 TUI：默认直接跑，不进 tmux。
+# claude 那边靠 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 换回了顺序输出，
+# 行能正常流进宿主控制台的回滚区，用 PowerShell 的滚动条/滚轮就能翻。
+# 套 tmux 只会把这一屏重画后交给 hdc，反而挡住回滚。想要会话续接再开：
+#   OHC_TMUX=1 opencode
+if [ "${OHC_TMUX:-0}" = "1" ] && [ -x /data/ohc/rootfs/claude/usr/local/bin/ohc-tmux ]; then
+    exec /data/ohc/bin/ohc run claude -- /usr/local/bin/ohc-tmux opencode "$@"
 fi
 
-exec /data/ohc/bin/ohc run claude -- /usr/local/bin/ohc-tmux opencode "$@"
+exec /data/ohc/bin/ohc run claude -- opencode "$@"

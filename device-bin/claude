@@ -20,11 +20,26 @@ case " $* " in
         exec /data/ohc/bin/ohc-claude "$@" < /dev/null ;;
 esac
 
-# 交互式：放进 tmux。
-# 原因见 etc/ohc-tmux 顶部注释——hdc 在 Windows 控制台上自己模拟固定尺寸屏幕，
-# 超屏的行不会进终端回滚区，所以只能让 tmux 在容器里存历史。
-if [ "${OHC_NO_TMUX:-0}" = "1" ] || [ ! -x /data/ohc/rootfs/claude/usr/local/bin/ohc-tmux ]; then
-    exec /data/ohc/bin/ohc-claude "$@"
+# 交互式：默认直接跑，不进 tmux。
+#
+# 翻屏这件事的最终结论（走了三次弯路）：
+#   1. 宿主控制台缓冲区调大 -> 没用，而且窗口一放大就闪退
+#   2. 装 tmux，历史归 tmux 管 -> 还是空的
+#   3. 真凶：claude 2.x 默认用 fullscreen renderer，自己维护虚拟滚动视口，
+#      120 行只把最后十几行画到屏幕上，一行都不交给终端。
+#      tmux 的 history 实测就是 0，装什么都是白装。
+#
+# 解法是在 env 里加 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1，强制 classic
+# renderer：顺序追加输出，行会真正流进 pty -> hdc -> PowerShell 的控制台缓冲区。
+# 这样直接用 PowerShell 的滚动条 / 鼠标滚轮就能翻，不需要背任何快捷键。
+#
+# 所以这里**不能**套 tmux：tmux 只把重画后的那一屏交给 hdc，宿主的滚动条
+# 依然是空的，反而把已经到手的回滚能力挡住了。
+#
+# 想要「断开还能接回同一个会话」的人，可以显式开 tmux：
+#   OHC_TMUX=1 claude
+if [ "${OHC_TMUX:-0}" = "1" ] && [ -x /data/ohc/rootfs/claude/usr/local/bin/ohc-tmux ]; then
+    exec /data/ohc/bin/ohc run claude -- /usr/local/bin/ohc-tmux claude "$@"
 fi
 
-exec /data/ohc/bin/ohc run claude -- /usr/local/bin/ohc-tmux claude "$@"
+exec /data/ohc/bin/ohc-claude "$@"

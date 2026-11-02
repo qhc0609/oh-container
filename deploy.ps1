@@ -55,6 +55,27 @@ function Write-Ok($m)   { Write-Host "    [OK] $m" -ForegroundColor Green }
 function Write-Warn2($m){ Write-Host "    [!]  $m" -ForegroundColor Yellow }
 function Fail($m)       { Write-Host "`n[失败] $m" -ForegroundColor Red; exit 1 }
 
+# hdc file send 的两个坑，都踩过：
+#   1) 目标是已存在的文件 -> 报 "Not a directory"；目标不存在 -> 直接建一个同名**目录**
+#   2) 源用相对路径时，中间的目录层级会被一起带进目标目录
+# 所以统一走「发到父目录 + 改名」，并且检查返回值，绝不拿 Out-Null 吞错误。
+function Push-File([string]$Local, [string]$RemoteDir, [string]$RemoteName) {
+    if (-not (Test-Path $Local)) { Fail "本地文件不存在：$Local" }
+    if (-not $RemoteName) { $RemoteName = Split-Path $Local -Leaf }
+    $base = Split-Path $Local -Leaf
+    & $Hdc shell "mkdir -p '$RemoteDir'" | Out-Null
+    $out = (& $Hdc file send $Local "$RemoteDir/" 2>&1) -join "`n"
+    if ($out -notmatch 'finish') {
+        Write-Warn2 "推送失败 $Local -> $RemoteDir/$RemoteName : $out"
+        return $false
+    }
+    if ($base -ne $RemoteName) {
+        & $Hdc shell "mv -f '$RemoteDir/$base' '$RemoteDir/$RemoteName'" | Out-Null
+    }
+    return $true
+}
+
+
 $RepoRoot = $PSScriptRoot
 $TmpDir   = Join-Path $env:TEMP "ohc-deploy"
 New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
@@ -147,13 +168,14 @@ Write-Ok "/data/ohc/containers/claude/env (600)"
 
 # ------------------------------------------------------------------ 6. 容器内配置
 Write-Step "推送容器内配置"
-& $Hdc file send (Join-Path $RepoRoot "etc\opencode.json") "/data/ohc/rootfs/claude/root/.config/opencode/opencode.json" | Out-Null
-& $Hdc file send (Join-Path $RepoRoot "etc\claude.json")   "/data/ohc/rootfs/claude/root/.claude.json" | Out-Null
+& $Hdc shell "mkdir -p /data/ohc/rootfs/claude/root/.config/opencode" | Out-Null
+Push-File (Join-Path $RepoRoot "etc\opencode.json") "/data/ohc/rootfs/claude/root/.config/opencode" "opencode.json" | Out-Null
+Push-File (Join-Path $RepoRoot "etc\claude.json")   "/data/ohc/rootfs/claude/root" ".claude.json" | Out-Null
 & $Hdc shell "chmod 644 /data/ohc/rootfs/claude/root/.claude.json /data/ohc/rootfs/claude/root/.config/opencode/opencode.json" | Out-Null
 Write-Ok "opencode.json + .claude.json"
 
-# ------------------------------------------------------------------ 6.5 容器内 tmux（翻屏）
-Write-Step "安装容器内 tmux（翻屏用）"
+# ------------------------------------------------------------------ 6.5 容器内 tmux（可选）
+Write-Step "安装容器内 tmux（可选：OHC_TMUX=1 时才用）"
 $rootfsClaude = "/data/ohc/rootfs/claude"
 $hasTmux = (& $Hdc shell "test -x $rootfsClaude/usr/bin/tmux && echo YES || echo NO" 2>&1) -join ''
 if ($hasTmux -notmatch 'YES') {
@@ -166,12 +188,11 @@ if ($hasTmux -notmatch 'YES') {
         Write-Warn2 "可以手动在容器里执行：apk add --no-cache tmux ncurses-terminfo-base"
     }
 }
-& $Hdc shell "mkdir -p $rootfsClaude/usr/local/bin" | Out-Null
-& $Hdc file send (Join-Path $RepoRoot "etc\ohc-tmux") "$rootfsClaude/usr/local/bin/ohc-tmux" | Out-Null
-& $Hdc file send (Join-Path $RepoRoot "etc\tmux.conf") "$rootfsClaude/root/.tmux.conf" | Out-Null
+Push-File (Join-Path $RepoRoot "etc\ohc-tmux")  "$rootfsClaude/usr/local/bin" "ohc-tmux" | Out-Null
+Push-File (Join-Path $RepoRoot "etc\tmux.conf") "$rootfsClaude/root" ".tmux.conf" | Out-Null
 & $Hdc shell "chmod 755 $rootfsClaude/usr/local/bin/ohc-tmux" | Out-Null
 & $Hdc shell "chmod 644 $rootfsClaude/root/.tmux.conf" | Out-Null
-Write-Ok "ohc-tmux + .tmux.conf"
+Write-Ok "ohc-tmux + .tmux.conf（含 alternate-screen off，翻页才有内容）"
 
 # ------------------------------------------------------------------ 7. OpenCode key
 if ($OcKey) {
@@ -232,15 +253,17 @@ Write-Host @"
   claude                 # DeepSeek V4.1-Flash（你自己的 DeepSeek Key）
   opencode               # OpenCode Zen 免费 DeepSeek V4.1-Flash Free
 
-翻屏（claude / opencode 都在 tmux 里跑）：
-  PageUp                 # 直接往上翻，不用按 Ctrl+B
-  q                      # 退出翻页模式
-  Ctrl+B d               # 暂时离开，再敲 claude 会接回同一个会话
+翻屏：
+  直接拖 PowerShell 的滚动条 / 滚鼠标滚轮就行，不用背快捷键。
+  原理：env 里 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 让 claude 用 classic
+  renderer 顺序输出，行才会真正流进宿主控制台的回滚区。
+
+  想要「断开还能接回同一个会话」（这条路要背快捷键）：
+  OHC_TMUX=1 claude      # 进 tmux；Ctrl+B [ 翻页，Ctrl+B / Ctrl+F 上下翻，q 退出
 
 其它：
   /data/ohc/bin/ohc doctor            # 环境自检
   /data/ohc/bin/ohc net               # 修复默认路由
   /data/ohc/bin/ohc-setkey sk-xxx     # 换 DeepSeek Key
   /data/ohc/bin/oc-setkey oc_sk-xxx   # 换 OpenCode Key
-  OHC_NO_TMUX=1 claude                # 不进 tmux，直接跑
 "@ -ForegroundColor Gray

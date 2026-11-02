@@ -195,7 +195,7 @@ if ($DryRun) {
 if (-not $Quiet) {
     Write-Host ""
     Write-Host "  进去后直接敲 claude 或 opencode" -ForegroundColor Gray
-    Write-Host "  翻屏：PageUp，或 Ctrl+B 然后 [（q 退出翻页）" -ForegroundColor Gray
+    Write-Host "  翻屏：直接拖滚动条 / 滚鼠标滚轮（claude 已切回顺序输出，行会进宿主回滚区）" -ForegroundColor Gray
     Write-Host "  退出会话（exit 或 Ctrl+D）后，尺寸跟随自动停止" -ForegroundColor Gray
     Write-Host ""
 }

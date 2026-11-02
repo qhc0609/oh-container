@@ -293,46 +293,83 @@ exec /data/ohc/bin/ohc-claude "$@"
 关键认知：**尺寸必须来自 hdc 之外那个宿主机控制台**（PowerShell / cmd 的窗口），
 而不是 hdc shell 里那个假的 80x24。hdc 自己不读、也不转发，只能由 PC 侧读出来再送进去。
 
-**坑二：翻屏——加缓冲区没用，因为行根本没进缓冲区。**
+**坑二：翻屏——真凶是 claude 自己的渲染器，既不在 hdc，也不在 tmux。**
 
-这一条和「窗口尺寸」是两回事，别混在一起。`hdc.exe` 里能 grep 到
-`GetConsoleScreenBufferInfo` / `SetConsoleCursorPosition` / `SetConsoleTextAttribute`：
-它**不是老实写字节流**，而是在 Windows 控制台上自己模拟一块「固定尺寸」的屏幕。
-超出窗口高度的行被它直接覆盖，从来没写进控制台的缓冲区——
-所以把 `BufferHeight` 调到 30000 也翻不到，那里根本没有那些行。
+先说清楚一件事，免得后面走弯路：**`hdc shell` 本身是能翻屏的**，宿主控制台
+的缓冲区是累积的。所以「翻不动」不是宿主的锅。但一进 claude，120 行输出就只剩
+最后十几行，往上翻什么都没有。
 
-修法：**在容器里跑 tmux**，历史由 tmux 自己存（`history-limit 50000`），
-和宿主终端是什么、缓冲区多大都无关。
+这里我连着误判了两次：
 
+| 误判 | 做法 | 结果 |
+|---|---|---|
+| 一 | 调大宿主控制台 `BufferHeight` | 没用；而且窗口一放大必闪退（窗口宽 120 > 缓冲区宽 80 时再设高度是非法状态） |
+| 二 | 容器里装 tmux，`history-limit 50000` | 还是空的。实测真 claude 跑在 tmux 里，`#{history_size}` **一直是 0** |
+
+`history_size=0` 说明了一件很关键的事：**claude 一行都没有交给终端**。
+不是 tmux 存不下，是压根没东西可存。
+
+真凶在 claude 二进制里。2.x 默认用 **fullscreen renderer**：切备用屏幕 +
+自己维护一块「虚拟滚动」的视口，用光标定位重画。120 行它只把最后十几行画到
+屏幕上，其余的自己截掉——终端、tmux、宿主缓冲区全都不知道那些行存在过。
+
+二进制里的原话（`busybox strings` 之后 grep 出来的）：
+
+> It happened while the fullscreen renderer was starting, so the next launch
+> will use the **classic renderer** (`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`
+> forces that any time).
+
+所以解法是一行 env，强制回到 classic renderer：
+
+```sh
+CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1
 ```
-claude ──▶ ohc run claude ──▶ tmux（容器内）──▶ claude
-                                   │
-                        历史存在 /tmp 里的 tmux 服务端
-                        PageUp 直接翻，不用按 Ctrl+B
-```
+
+classic renderer 是顺序追加：行会真正流进 pty → hdc → PowerShell 的控制台缓冲区，
+于是**直接拖 PowerShell 的滚动条 / 滚鼠标滚轮就能翻**，不用背任何快捷键。
+
+两个配套结论：
+
+- **别加 `CLAUDE_CODE_DISABLE_VIRTUAL_SCROLL`**。听着最对症，实测界面直接变空白。
+- **默认不要再套 tmux**。tmux 只把「重画后的那一屏」交给 hdc，宿主的滚动条
+  依然是空的，等于把已经到手的回滚能力挡住了。想要「断开还能接回同一个会话」
+  的人再显式开：`OHC_TMUX=1 claude`（这条路下 `etc/tmux.conf` 里的
+  `set -g alternate-screen off` 才有意义）。
 
 配套改动：
 
+- `etc/claude.env` → 容器 env：**`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`**（翻屏的根）
+- `device-bin/claude`、`device-bin/opencode`：交互式**默认直接跑**，`-p` / `run` 同理；
+  想要会话续接再显式 `OHC_TMUX=1 claude`
 - `etc/ohc-tmux` → 容器内 `/usr/local/bin/ohc-tmux`，把 argv 逐个转义后交给
   `tmux new-session -A`（`-A`：已有会话就接上，断开后还能回来）
-- `etc/tmux.conf` → 容器内 `/root/.tmux.conf`：5 万行历史、鼠标、`PageUp` 直接翻页
-- `device-bin/claude`、`device-bin/opencode`：交互式走 tmux，`-p` / `run` 仍直接跑；
-  `OHC_NO_TMUX=1` 可关掉
+- `etc/tmux.conf` → 容器内 `/root/.tmux.conf`：5 万行历史、`alternate-screen off`、
+  `PageUp` / `Ctrl+B [` 翻页（只在 `OHC_TMUX=1` 那条路下才用到）
+- `TMUX_TMPDIR=/work/.tmux`：tmux 的 socket 默认放 `/tmp`，而 `ohc` 每次进来都会给
+  `/tmp` 挂一个新的 tmpfs，等于每次都是全新服务端，`-A` 永远接不上上一次的会话。
+  放到 `/work`（绑定到宿主 `/data/ohc/workspace`，刷机前都在）才真能续上
 - `bin/ohc`：容器内**单独挂一次 devpts**。实测 `mount --rbind /dev` 在本机会退化成
   `--bind`，submount 没带进来，`/dev/pts` 是空目录 → tmux 报
   `create window failed: fork failed: No such device`。不指定 `newinstance`，
   和宿主的 `/dev/ptmx` 同实例，才能正常开 pty
 
-实测（真实 pty 里跑容器）：
+实测（真 claude 跑在 100x30 的 tmux 里，让它输出 120 行「1」；
+这里用 tmux 只是当**测量工具**——它的 `history_size` 涨了，等价于「这些行确实交给了终端」）：
 
-| 项 | 结果 |
-|---|---|
-| 可见区 | 24 行 |
-| `tmux capture-pane -S -300` 抓到的历史 | **201 行** |
-| 最早一行 `1` 是否还在 | **FOUND_LINE_1** |
-| tmux 配置 | `history-limit 50000` / `mouse on` / `xterm-256color` |
-| 参数转义（空格 / 单引号 / 双引号 / 分号） | 全部原样还原，`GOT:[x y z]` |
-| `claude --version` / `opencode --version` 在 tmux 里 | 正常输出 2.1.x / 1.19.x |
+| 项 | 未设 env（fullscreen renderer） | 设 `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` |
+|---|---|---|
+| `#{alternate_on}` | 0（tmux 已拦掉备用屏幕） | 0 |
+| `#{history_size}` | **0** | **108** |
+| 历史里「1」的行数 | **0** | **120** |
+| 屏幕上能看到 | 最后十几行 | 最后一屏（其余在回滚区） |
+
+结论：拦掉备用屏幕**不够**，必须让 claude 换回 classic renderer，
+行才会交给终端。只关备用屏幕时 `history_size` 依然是 0。
+
+> 同一个载荷换成裸脚本（`ESC[?1049h` + 喷 200 行）时，
+> `alternate-screen off` 能让 `history_size` 到 177（= 200 − 24 + 1）——
+> 这证明 tmux 那一侧没问题，问题只在 claude 的渲染器。
+> 回归脚本：`scripts/test-scrollback.sh`（裸载荷）、`scripts/test-claude-render.sh`（真 claude）。
 
 > 用 `busybox resize` 兜底那条路也试过：它本该发 CSI 18 t 问终端尺寸，
 > 但这台设备上一次都没发出去，已删掉（详见上一节）。
