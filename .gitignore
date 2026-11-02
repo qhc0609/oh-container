@@ -27,3 +27,7 @@ desktop.ini
 __pycache__/
 *.pyc
 .venv/
+
+# 临时文件（探测脚本、API 推送中间产物）
+.tmp-*
+*.tmp
