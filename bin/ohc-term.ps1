@@ -250,6 +250,21 @@ if (-not $Quiet) {
 # 只要缓冲区不缩回窗口大小，hdc 那些旧坐标就仍然落在合法范围内。
 # 必须保证 buffer 宽 >= 窗口宽、buffer 高 >= 窗口高，否则就是非法状态
 # —— 之前把 conhost 写崩过，就是栽在这一条上（宽 80 < 窗口宽 120）。
+
+# 先关掉「调整窗口大小时重排文本」（reflow）。
+# 这台机器的控制台缓冲区默认是 120x9001（ScreenBufferSize=589889656）：
+# 最大化时 conhost 要把 9001 行按 1904 列重排一遍，claude 那些彩色和框线
+# 内容正好把它压垮——现象就是「窗口已经最大化，claude 还没重画，就闪退了」。
+# 关掉之后缩放只裁剪不重排，代价是调宽窗口时已有文本不会跟着重排。
+# 这是 HKCU 下的全局设置，只对**新开**的控制台窗口生效，随时可以改回 1。
+try {
+    $lw = (Get-ItemProperty 'HKCU:\Console' -Name LineWrap -ErrorAction SilentlyContinue).LineWrap
+    if ($null -ne $lw -and $lw -ne 0) {
+        Set-ItemProperty 'HKCU:\Console' -Name LineWrap -Value 0 -Type DWord
+        Write-Ok "已关闭控制台缩放重排（LineWrap=0），对下次新开的窗口生效"
+    }
+} catch { }
+
 if (-not $NoBigBuffer) {
     try {
         $w = [Console]::WindowWidth
