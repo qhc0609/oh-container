@@ -3,7 +3,7 @@
 #
 # 为什么需要它：
 #   hdc 给设备 pty 的尺寸是写死的（环境里 COLUMNS=80 LINES=24），
-#   而且 PowerShell 窗口拖动时 hdc 不会通知设备。
+#   而且 PC 窗口拖动时 hdc 不会通知设备。
 #   所以 TUI（claude / opencode）永远按 80x24 画，窗口再大也只用到左上角。
 #
 # 怎么做的：
@@ -11,7 +11,7 @@
 #   这里读出来，用 busybox stty 应用到当前 pty，并起一个后台守护，
 #   窗口一变就跟着改（stty 会触发 SIGWINCH，TUI 自己重画）。
 #
-# 没有 PC 侧配合时，退一步用 busybox resize 直接问终端。
+# 没有 PC 侧配合时，退一步用 busybox resize 直接问终端（带 2 秒超时）。
 #   Windows Terminal 会应答 CSI 18 t；老的 conhost 不会，那就保持原样。
 
 TTYF=${OHC_TTYFILE:-/data/ohc/run/tty}
@@ -44,8 +44,20 @@ if [ -f "$TTYF" ]; then
 fi
 
 # 2) 没有可用文件，就直接问终端
+#    busybox resize 会发 CSI 18 t 问终端尺寸；Windows Terminal 会应答，老 conhost 不会。
+#    加 timeout 防止终端不应答时卡住启动。注意不能用 resize -s：
+#    它内部要调 stty，而宿主机上没有 stty。
 if [ "$_used" = "0" ]; then
-    busybox resize -s 2>/dev/null
+    _rd=$(busybox timeout 2 busybox resize 2>/dev/null)
+    case "$_rd" in
+        *COLUMNS=*LINES=*)
+            _c=${_rd#*COLUMNS=}
+            _c=${_c%%[!0-9]*}
+            _r=${_rd#*LINES=}
+            _r=${_r%%[!0-9]*}
+            _apply "$_r" "$_c"
+            ;;
+    esac
 fi
 
 # 3) 后台跟随窗口变化；pty 设备消失就退出
