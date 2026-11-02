@@ -264,6 +264,49 @@ if (Test-Path $prof) {
     Write-Warn2 "没找到 bin\ohc-profile.ps1，跳过 hdc 包装"
 }
 
+# 9.3 装网关守护进程：手机一插上就自动起网关，VS Code 立刻可用。
+# 装到 %LOCALAPPDATA%\ohc-gateway，不依赖仓库目录还在不在。
+$daemonSrc = Join-Path $repoRoot "bin\ohc-gateway-daemon.ps1"
+$gwSrc = Join-Path $repoRoot "etc\ohc-gw.mjs"
+if ((Test-Path $daemonSrc) -and (Test-Path $gwSrc)) {
+    try {
+        $dataDir = Join-Path $env:LOCALAPPDATA "ohc-gateway"
+        if (-not (Test-Path $dataDir)) { New-Item -ItemType Directory -Path $dataDir -Force | Out-Null }
+        Copy-Item $daemonSrc (Join-Path $dataDir "ohc-gateway-daemon.ps1") -Force
+        Copy-Item $gwSrc (Join-Path $dataDir "ohc-gw.mjs") -Force
+        $psExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+        $null = & $psExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dataDir "ohc-gateway-daemon.ps1") -Install 2>&1
+        Write-Ok "网关守护进程已安装（手机插上自动就绪）"
+    } catch {
+        Write-Warn2 ("安装网关守护进程失败：" + $_.Exception.Message)
+    }
+} else {
+    Write-Warn2 "没找到 ohc-gateway-daemon.ps1 / ohc-gw.mjs，跳过网关守护进程"
+}
+
+# 9.4 VS Code 的 Continue 配置：只有在没配过模型时才写，不覆盖用户自己的配置
+$contCfg = Join-Path $repoRoot "etc\continue-config.yaml"
+$contDst = Join-Path $env:USERPROFILE ".continue\config.yaml"
+if (Test-Path $contCfg) {
+    $needWrite = $true
+    if (Test-Path $contDst) {
+        $cur = Get-Content $contDst -Raw -ErrorAction SilentlyContinue
+        if ($cur -and $cur -notmatch 'models:\s*\[\s*\]') { $needWrite = $false }
+    }
+    if ($needWrite) {
+        try {
+            $dir = Split-Path $contDst -Parent
+            if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            Copy-Item $contCfg $contDst -Force
+            Write-Ok "已写入 Continue 配置（VS Code 里 Ctrl+L 直接用）"
+        } catch {
+            Write-Warn2 ("写 Continue 配置失败：" + $_.Exception.Message)
+        }
+    } else {
+        Write-Ok "Continue 已有自己的模型配置，未覆盖"
+    }
+}
+
 # ------------------------------------------------------------------ 完成
 Write-Host ""
 Write-Host "===============================================" -ForegroundColor Green

@@ -50,6 +50,14 @@ function withCharset(ct, fallback) {
 }
 
 const server = http.createServer((req, res) => {
+    const t0 = Date.now();
+
+    // 每个请求打一行，写进 /work/ohc-gw.log。
+    // 排查「VS Code 到底有没有打到网关上」时看这里最快。
+    res.on('finish', () => {
+        console.log(`${new Date().toISOString()} ${req.method} ${req.url} -> ${res.statusCode} ${Date.now() - t0}ms`);
+    });
+
     // 健康检查：PC 侧用来确认通道通了
     if (req.url === '/healthz') {
         res.writeHead(200, { 'content-type': 'text/plain' });

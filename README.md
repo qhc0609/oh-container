@@ -23,6 +23,7 @@ oh-container/
 │   ├── oc-setkey            写入 OpenCode Key
 │   ├── ohc-term.ps1         PC 侧启动器：读宿主机窗口尺寸 + 控制台缓冲区（翻页）
 │   ├── ohc-gateway.ps1      PC 侧网关启动器：让 VS Code 用上这套 DeepSeek
+│   ├── ohc-gateway-daemon.ps1 常驻守护：手机插上自动起网关（计划任务）
 │   └── ohc-profile.ps1      一次性安装 hdc 包装层，让 hdc shell 自动带尺寸
 ├── device-bin/              放到设备 PATH 里的入口脚本
 │   ├── claude
@@ -32,6 +33,7 @@ oh-container/
 │   ├── claude.json          .claude.json 种子（跳过引导、信任目录）
 │   ├── opencode.json        默认模型（免费 DeepSeek）
 │   ├── ohc-gw.mjs           OpenAI 兼容网关（容器内跑，给 PC 的 VS Code 用）
+│   ├── continue-config.yaml VS Code 里 Continue 的模型配置模板
 │   ├── ohc-tmux             容器内滚屏启动器（部署到 /usr/local/bin）
 │   └── tmux.conf            tmux 配置：5 万行历史 + PageUp 直接翻页
 ├── backup/                  备份与一键恢复
@@ -712,4 +714,114 @@ healthz                          -> ohc-gw ok
 max_tokens=64 自动抬升           -> content_len=144（修复前是 0）
 响应补 charset 后                -> content.Length=2, codepoints=25910,21040（收、到）
 ```
+
+---
+
+## 12. VS Code 一键配置（不用手工填任何东西）
+
+上一章讲的是「怎么配」，这一章是**已经配好之后长什么样**，以及怎么复现。
+
+### 为什么没用 VS Code 自带的 Copilot BYOK
+
+VS Code 1.144 内置了 Copilot，也支持 `chatLanguageModels.json` 接第三方模型，
+听起来是最短路径。但实测这台机器上：
+
+```
+state.vscdb -> extensionsIdentifiers/disabled = [{"id":"github.copilot-chat"}]
+           -> chat.setupContext = {"installed":true,"disabled":true}
+```
+
+Copilot Chat 是被**显式禁用**的，没有聊天面板，BYOK 配置再好也没地方用。
+而改 `state.vscdb` 必须在 VS Code 关闭时做，风险高、收益低。
+
+所以走 **Continue 扩展**：自带侧边栏聊天面板，不依赖 Copilot，配置就是一个 YAML 文件。
+
+### 装了/写了什么
+
+| 位置 | 内容 |
+|---|---|
+| `~/.vscode/extensions/continue.continue-2.0.0-win32-x64/` | Continue 扩展本体 |
+| `~/.continue/config.yaml` | 两个模型，都指向 `http://127.0.0.1:18080/v1` |
+| `%LOCALAPPDATA%\ohc-gateway\ohc-gateway-daemon.ps1` | 守护进程（开机自启） |
+| `%LOCALAPPDATA%\ohc-gateway\ohc-gw.mjs` | 网关脚本副本，仓库不在了也能跑 |
+| 计划任务 `ohc-gateway-daemon` | 登录时启动守护进程 |
+
+`config.yaml` 的核心就这几行：
+
+```yaml
+models:
+  - name: DeepSeek V4.1 Flash（手机中转）
+    provider: openai
+    model: deepseek-flash
+    apiBase: http://127.0.0.1:18080/v1
+    apiKey: sk-ohc-gateway        # 假的，网关会换成手机里的真 Key
+    contextLength: 65536
+    roles: [chat, edit, apply]
+    capabilities: [tool_use]
+    defaultCompletionOptions:
+      maxTokens: 8192             # 别低于 2048，见上一章坑 1
+```
+
+写完用 Continue 自己的 schema 校验过一遍：
+
+```
+PASS  config.yaml 通过 Continue 官方 schema 校验
+  - DeepSeek V4.1 Flash（手机中转）: provider=openai model=deepseek-flash roles=['chat','edit','apply']
+  - DeepSeek V4 Pro（手机中转）:     provider=openai model=deepseek-v4-pro  roles=['chat','edit','apply']
+```
+
+Continue 启动后自动选中了它（`~/.continue/index/globalContext.json`）：
+
+```json
+{"local": {"chat": "DeepSeek V4.1 Flash（手机中转）",
+           "edit": "DeepSeek V4.1 Flash（手机中转）",
+           "apply": "DeepSeek V4.1 Flash（手机中转）"}}
+```
+
+### 怎么用
+
+打开 VS Code，**`Ctrl+L`** 打开 Continue 聊天框，直接问就行。
+
+第一次装完扩展要重载窗口：新开一个窗口，或 `Ctrl+Shift+P` → `Reload Window`。
+
+### 手机插上就自动可用
+
+不用再手动跑脚本。计划任务在登录时拉起守护进程，它每 5 秒看一眼设备：
+
+```
+[00:46:11] 检测到设备 03516892320539，开始准备网关
+[00:46:14] 网关已启动 pid=7248
+[00:46:15] 端口映射已建立 tcp:18080
+[00:46:15] 就绪，VS Code 现在可以用了
+```
+
+拔掉手机：
+
+```
+[00:52:03] 设备已断开，收掉网关
+```
+
+管理命令：
+
+```powershell
+$d = "$env:LOCALAPPDATA\ohc-gateway\ohc-gateway-daemon.ps1"
+powershell -ExecutionPolicy Bypass -File $d -Status      # 看任务状态 + 最近日志
+powershell -ExecutionPolicy Bypass -File $d -Install     # 重装/修复计划任务
+powershell -ExecutionPolicy Bypass -File $d -Uninstall   # 卸载
+powershell -ExecutionPolicy Bypass -File $d -Once        # 前台跑一轮，排查用
+```
+
+网关自己在设备上打访问日志，排查「VS Code 到底有没有打到网关」看这里：
+
+```powershell
+hdc shell "tail -5 /data/ohc/workspace/ohc-gw.log"
+# 2026-11-02T16:48:19.749Z GET /healthz -> 200 15ms
+# 2026-11-02T16:51:02.113Z POST /v1/chat/completions -> 200 3412ms
+```
+
+### 一个提醒
+
+Continue 的 `apiKey` 是假的（`sk-ohc-gateway`），**网关只认真 Key 在手机里**。
+所以这份 `config.yaml` 就算被同步到云端、发给同事，也不泄露任何东西。
+
 
