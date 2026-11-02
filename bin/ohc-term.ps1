@@ -143,40 +143,52 @@ if (-not $NoWatcher) {
         $r = $lastR
         $c = $lastC
         $fail = 0
+        $dirtyAt = 0          # 最后一次发现尺寸变化的时刻；0 表示没有待推送的尺寸
+        $stableMs = 500       # 连续 500ms 不再变化才推
         while ($true) {
             try {
-                # 只读控制台，不改任何状态
+                # 只读控制台，绝不写（写缓冲区会让 conhost 直接 fail-fast）
                 $nr = [Console]::WindowHeight
                 $nc = [Console]::WindowWidth
-                if (($nr -ne $r -or $nc -ne $c) -and $nr -ge 5 -and $nc -ge 20) {
+                if ($nr -ne $r -or $nc -ne $c) {
                     $r = $nr
                     $c = $nc
-                    [System.IO.File]::WriteAllText($sizeFile, "$nr $nc`n", [System.Text.Encoding]::ASCII)
-                    $pi = New-Object System.Diagnostics.ProcessStartInfo
-                    $pi.FileName = $hdcPath
-                    $pi.Arguments = "file send `"$sizeFile`" /data/ohc/run/"
-                    $pi.UseShellExecute = $false
-                    $pi.CreateNoWindow = $true
-                    $pi.RedirectStandardInput = $true
-                    $pi.RedirectStandardOutput = $true
-                    $pi.RedirectStandardError = $true
-                    $p = [System.Diagnostics.Process]::Start($pi)
-                    try { $p.StandardInput.Close() } catch { }
-                    if (-not $p.WaitForExit(3000)) { try { $p.Kill() } catch { } }
-                    $rc = $p.ExitCode
-                    try { $p.Dispose() } catch { }
-                    if ($rc -ne 0) { $fail++ } else { $fail = 0 }
-                    if ($fail -ge 5) { break }
+                    $dirtyAt = [Environment]::TickCount
+                }
+                # 关键：拖动窗口的过程中一次都不推。
+                # 每推一次尺寸，设备侧就 SIGWINCH -> claude 整屏重画，
+                # 一大串转义序列正好灌在 conhost 正在缩放的当口，很容易把它打崩
+                # （实测 conhost.exe 0xc0000409 / BEX64）。停稳 500ms 只重画一次。
+                if ($dirtyAt -ne 0 -and ([Environment]::TickCount - $dirtyAt) -ge $stableMs) {
+                    $dirtyAt = 0
+                    if ($r -ge 10 -and $c -ge 40) {
+                        [System.IO.File]::WriteAllText($sizeFile, "$r $c`n", [System.Text.Encoding]::ASCII)
+                        $pi = New-Object System.Diagnostics.ProcessStartInfo
+                        $pi.FileName = $hdcPath
+                        $pi.Arguments = "file send `"$sizeFile`" /data/ohc/run/"
+                        $pi.UseShellExecute = $false
+                        $pi.CreateNoWindow = $true
+                        $pi.RedirectStandardInput = $true
+                        $pi.RedirectStandardOutput = $true
+                        $pi.RedirectStandardError = $true
+                        $p = [System.Diagnostics.Process]::Start($pi)
+                        try { $p.StandardInput.Close() } catch { }
+                        if (-not $p.WaitForExit(3000)) { try { $p.Kill() } catch { } }
+                        $rc = $p.ExitCode
+                        try { $p.Dispose() } catch { }
+                        if ($rc -ne 0) { $fail++ } else { $fail = 0 }
+                        if ($fail -ge 5) { break }
+                    }
                 }
             } catch {
                 $fail++
                 if ($fail -ge 5) { break }
             }
-            Start-Sleep -Milliseconds 600
+            Start-Sleep -Milliseconds 250
         }
     }).AddArgument($Hdc).AddArgument($sizeFile).AddArgument($initR).AddArgument($initC)
     $null = $watcher.BeginInvoke()
-    Write-Ok "窗口尺寸跟随已开启（拖动窗口后约 1 秒生效）"
+    Write-Ok "窗口尺寸跟随已开启（窗口停稳约 0.5 秒后才重画一次）"
 }
 
 # ------------------------------------------------------------------ 4. 交互会话
@@ -197,6 +209,8 @@ if (-not $Quiet) {
     Write-Host "  进去后直接敲 claude 或 opencode" -ForegroundColor Gray
     Write-Host "  翻屏：直接拖滚动条 / 滚鼠标滚轮（claude 已切回顺序输出，行会进宿主回滚区）" -ForegroundColor Gray
     Write-Host "  退出会话（exit 或 Ctrl+D）后，尺寸跟随自动停止" -ForegroundColor Gray
+    Write-Host "  提示：先把窗口拉到合适大小再进来。hdc 自己处理缩放有 bug，" -ForegroundColor DarkGray
+    Write-Host "        会话进行中反复缩放可能让整个窗口崩掉（conhost 0xc0000409）" -ForegroundColor DarkGray
     Write-Host ""
 }
 
