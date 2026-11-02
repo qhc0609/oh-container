@@ -143,6 +143,37 @@ function Remove-Forward {
     if (Test-Forward) { & $Hdc fport rm "tcp:$Port" "tcp:$Port" 2>&1 | Out-Null }
 }
 
+# 只查 fport ls 是不够的：实测出现过「映射记录在、但本机 18080 根本没监听」
+# 的情况（hdc server 重启/设备重新枚举后，ruler 还在，listener 没了）。
+# 这时 Continue 会报 "Error handling model response"，看着像模型出错，
+# 其实是连不上。必须真的去连一下端口。
+function Test-GatewayPort {
+    $c = New-Object System.Net.Sockets.TcpClient
+    try {
+        $iar = $c.BeginConnect('127.0.0.1', $Port, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne(1500)) { return $false }
+        $c.EndConnect($iar)
+        return $true
+    } catch {
+        return $false
+    } finally {
+        $c.Close()
+    }
+}
+
+function Add-Forward {
+    # 旧 ruler 占着端口时 add 会失败，先拆；再失败就退避重试
+    for ($i = 1; $i -le 3; $i++) {
+        $fp = (& $Hdc fport "tcp:$Port" "tcp:$Port" 2>&1) -join ' '
+        Start-Sleep -Milliseconds 400
+        if (Test-GatewayPort) { return $true }
+        Write-Log "第 $i 次建映射没通（$fp），拆掉重试"
+        Remove-Forward
+        Start-Sleep -Milliseconds 800
+    }
+    return $false
+}
+
 function Start-Gateway {
     if (-not $GwPath -or -not (Test-Path $GwPath)) { Write-Log "找不到 ohc-gw.mjs，跳过"; return $false }
 
@@ -161,12 +192,10 @@ function Start-Gateway {
     if (-not $gwPid) { Write-Log '网关进程没起来'; return $false }
     Write-Log "网关已启动 pid=$gwPid"
 
-    if (-not (Test-Forward)) {
-        $fp = (& $Hdc fport "tcp:$Port" "tcp:$Port" 2>&1) -join ' '
-        Start-Sleep -Milliseconds 400
-        if (-not (Test-Forward)) { Write-Log "fport 失败: $fp"; return $false }
-        Write-Log "端口映射已建立 tcp:$Port"
-    }
+    # 映射可能是"假活"，先无条件拆掉重建
+    Remove-Forward
+    if (-not (Add-Forward)) { Write-Log "端口映射建不起来，放弃本轮"; return $false }
+    Write-Log "端口映射已建立且可连通 tcp:$Port"
     return $true
 }
 
@@ -203,13 +232,20 @@ while ($true) {
 
         if ($hasDev) {
             $up = (Get-GwPid) -ne ''
-            $fwd = Test-Forward
-            if (-not $up -or -not $fwd) {
-                if ($wasUp) { Write-Log "检测到网关/映射掉了，重建" }
+            # 三条都要过：进程在、ruler 在、本机端口真的能连上。
+            # 只看前两条会漏掉「ruler 在但没监听」这种假活状态。
+            $live = $up -and (Test-Forward) -and (Test-GatewayPort)
+
+            if (-not $live) {
+                if ($wasUp) { Write-Log "检测到网关/映射失效（进程=$up），重建" }
                 else { Write-Log "检测到设备 $($dev -join ',')，开始准备网关" }
                 if (Start-Gateway) {
                     if (-not $wasUp) { Write-Log '就绪，VS Code 现在可以用了' }
                     $wasUp = $true
+                } else {
+                    # 建不起来就别每 5 秒硬撞一次，缓一轮
+                    Write-Log '本轮没建起来，10 秒后重试'
+                    Start-Sleep -Seconds 10
                 }
             } elseif (-not $wasUp) {
                 Write-Log '网关已在运行，无需重复启动'

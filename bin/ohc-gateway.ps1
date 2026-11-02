@@ -87,6 +87,18 @@ function Remove-Forward {
     return $false
 }
 
+# 只查 fport ls 不够：实测会出现「映射记录在、本机端口没监听」的假活状态，
+# 客户端连不上却报成 "Error handling model response"。必须真去连一下。
+function Test-GatewayPort {
+    $c = New-Object System.Net.Sockets.TcpClient
+    try {
+        $iar = $c.BeginConnect('127.0.0.1', $Port, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne(1500)) { return $false }
+        $c.EndConnect($iar)
+        return $true
+    } catch { return $false } finally { $c.Close() }
+}
+
 # ------------------------------------------------------------------ 1. Stop
 if ($Stop) {
     Write-Step "停掉网关"
@@ -103,7 +115,9 @@ if ($Status) {
     $gwPid = Get-GwPid
     if ($gwPid) { Write-Ok "网关进程: $gwPid" } else { Write-Warn2 "网关没在跑" }
     $ls = (& $Hdc fport ls 2>&1) -join "`n"
-    if ($ls -match [regex]::Escape($Port)) { Write-Ok "端口映射在: $taskStr" } else { Write-Warn2 "端口映射不在" }
+    if ($ls -match [regex]::Escape($Port)) { Write-Ok "端口映射记录在: $taskStr" } else { Write-Warn2 "端口映射记录不在" }
+    if (Test-GatewayPort) { Write-Ok "127.0.0.1:$Port 可连通" }
+    else { Write-Warn2 "127.0.0.1:$Port 连不上（映射是假活，跑一次不带参数的启动即可修复）" }
     return
 }
 
@@ -149,9 +163,16 @@ if ($removed) { Write-Ok "清掉了旧映射" }
 $fp = (& $Hdc fport "tcp:$Port" "tcp:$Port" 2>&1) -join ' '
 Write-Host "    $fp" -ForegroundColor DarkGray
 Start-Sleep -Milliseconds 500
-$ls = (& $Hdc fport ls 2>&1) -join "`n"
-if ($ls -notmatch [regex]::Escape($Port)) { Fail "fport 没建立成功：$fp" }
-Write-Ok "127.0.0.1:$Port -> 设备 $Port"
+if (-not (Test-GatewayPort)) {
+    # 旧 socket 还在 TIME_WAIT 时 add 会失败，拆掉再来一次
+    $null = Remove-Forward
+    Start-Sleep -Milliseconds 800
+    $fp = (& $Hdc fport "tcp:$Port" "tcp:$Port" 2>&1) -join ' '
+    Write-Host "    $fp" -ForegroundColor DarkGray
+    Start-Sleep -Milliseconds 500
+    if (-not (Test-GatewayPort)) { Fail "127.0.0.1:$Port 连不上：$fp" }
+}
+Write-Ok "127.0.0.1:$Port -> 设备 $Port（已验证可连通）"
 
 Write-Step "验证通道"
 $base = "http://127.0.0.1:$Port"

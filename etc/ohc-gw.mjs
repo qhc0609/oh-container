@@ -54,8 +54,16 @@ const server = http.createServer((req, res) => {
 
     // 每个请求打一行，写进 /work/ohc-gw.log。
     // 排查「VS Code 到底有没有打到网关上」时看这里最快。
+    let finished = false;
     res.on('finish', () => {
+        finished = true;
         console.log(`${new Date().toISOString()} ${req.method} ${req.url} -> ${res.statusCode} ${Date.now() - t0}ms`);
+    });
+    // 客户端提前断开（Continue 解析失败后主动掐断就是这种表现）
+    res.on('close', () => {
+        if (!finished) {
+            console.log(`${new Date().toISOString()} ${req.method} ${req.url} -> CLIENT ABORTED after ${Date.now() - t0}ms`);
+        }
     });
 
     // 健康检查：PC 侧用来确认通道通了
@@ -79,6 +87,15 @@ const server = http.createServer((req, res) => {
         if (req.method === 'POST' && req.url.startsWith('/v1/chat/completions') && body.length) {
             try {
                 const obj = JSON.parse(body.toString('utf8'));
+                // 打一行请求摘要，出问题时能看出客户端到底发了什么
+                const nMsg = Array.isArray(obj.messages) ? obj.messages.length : 0;
+                const nTool = Array.isArray(obj.tools) ? obj.tools.length : 0;
+                const nChar = Array.isArray(obj.messages)
+                    ? obj.messages.reduce((s, m) => s + String(m.content || '').length, 0) : 0;
+                console.log(`${new Date().toISOString()}   req model=${obj.model} stream=${!!obj.stream} ` +
+                    `msgs=${nMsg} chars=${nChar} tools=${nTool} max_tokens=${obj.max_tokens}` +
+                    (obj.tool_choice ? ` tool_choice=${JSON.stringify(obj.tool_choice)}` : ''));
+
                 if (typeof obj.max_tokens === 'number' && obj.max_tokens < MIN_MAXTOKENS) {
                     obj.max_tokens = MIN_MAXTOKENS;
                     body = Buffer.from(JSON.stringify(obj), 'utf8');
@@ -98,7 +115,20 @@ const server = http.createServer((req, res) => {
         const up = https.request(
             { hostname: u.hostname, port: 443, path: u.pathname + u.search, method: req.method, headers },
             (ur) => {
-                res.writeHead(ur.statusCode || 502, {
+                const status = ur.statusCode || 502;
+                if (status >= 400) {
+                    // 上游报错时把响应体也记下来，否则只有一个状态码根本查不出原因
+                    const eb = [];
+                    ur.on('data', (c) => eb.push(c));
+                    ur.on('end', () => {
+                        const txt = Buffer.concat(eb).toString('utf8').slice(0, 600);
+                        console.log(`${new Date().toISOString()}   UPSTREAM ${status}: ${txt}`);
+                        res.writeHead(status, { 'content-type': withCharset(ur.headers['content-type'], 'application/json') });
+                        res.end(Buffer.concat(eb));
+                    });
+                    return;
+                }
+                res.writeHead(status, {
                     'content-type': withCharset(ur.headers['content-type'], 'application/json'),
                     'cache-control': 'no-cache',
                     // 让中间层别攒着，SSE 才能逐字到
