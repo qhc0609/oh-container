@@ -30,10 +30,10 @@ try {
     $OutputEncoding = [System.Text.Encoding]::UTF8
 } catch { }
 
-function Write-Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
+function Write-Step($m) { Write-Host ""; Write-Host "==> $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "    [OK] $m" -ForegroundColor Green }
 function Write-Warn2($m){ Write-Host "    [!]  $m" -ForegroundColor Yellow }
-function Fail($m)       { Write-Host "`n[失败] $m" -ForegroundColor Red; exit 1 }
+function Fail($m)       { Write-Host ""; Write-Host "[失败] $m" -ForegroundColor Red; exit 1 }
 
 if (-not $OutDir) { $OutDir = $PSScriptRoot }
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }

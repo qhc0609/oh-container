@@ -45,10 +45,10 @@ try {
     $OutputEncoding = [System.Text.Encoding]::UTF8
 } catch { }
 
-function Write-Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
+function Write-Step($m) { Write-Host ""; Write-Host "==> $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "    [OK] $m" -ForegroundColor Green }
 function Write-Warn2($m){ Write-Host "    [!]  $m" -ForegroundColor Yellow }
-function Fail($m)       { Write-Host "`n[失败] $m" -ForegroundColor Red; exit 1 }
+function Fail($m)       { Write-Host ""; Write-Host "[失败] $m" -ForegroundColor Red; exit 1 }
 
 # hdc file send 的两个坑：目标是已存在的文件会报 "Not a directory"，
 # 目标不存在则会建一个同名**目录**。统一走「发到父目录 + 改名」。

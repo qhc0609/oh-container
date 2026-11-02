@@ -37,6 +37,18 @@ function json(res, code, obj) {
     res.end(s);
 }
 
+// DeepSeek 上游返回的 content-type 常常只有 "application/json"，不带 charset。
+// PowerShell 5.1 的 Invoke-RestMethod 遇到没有 charset 的响应会按 Latin-1 解码，
+// 中文全变成 "æ¶å°" 这种乱码（"收到" 的 UTF-8 字节被当成单字节字符）。
+// VS Code 的插件走 Node fetch，不受影响，但 PC 侧自检脚本会被坑。
+// 所以这里统一补上 charset=utf-8。
+function withCharset(ct, fallback) {
+    const v = ct || fallback;
+    if (/charset=/i.test(v)) return v;
+    if (/^(application\/json|text\/|application\/x-ndjson)/i.test(v)) return v + '; charset=utf-8';
+    return v;
+}
+
 const server = http.createServer((req, res) => {
     // 健康检查：PC 侧用来确认通道通了
     if (req.url === '/healthz') {
@@ -79,7 +91,7 @@ const server = http.createServer((req, res) => {
             { hostname: u.hostname, port: 443, path: u.pathname + u.search, method: req.method, headers },
             (ur) => {
                 res.writeHead(ur.statusCode || 502, {
-                    'content-type': ur.headers['content-type'] || 'application/json',
+                    'content-type': withCharset(ur.headers['content-type'], 'application/json'),
                     'cache-control': 'no-cache',
                     // 让中间层别攒着，SSE 才能逐字到
                     'x-accel-buffering': 'no'

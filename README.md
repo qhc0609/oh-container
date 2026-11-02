@@ -675,15 +675,32 @@ hdc fport rm tcp:18080 tcp:18080      # Remove forward ruler success
 报 `TCP Port listen failed at 18080`——端口被上一次的残留占着。
 你以为新映射建好了，其实一直在用旧的。排查了半天才发现是这行。
 
-**3. PowerShell 5.1 发中文会变成 `?`**
+**3. PowerShell 5.1 的编码是双向的坑**
+
+发出去：
 
 ```powershell
 Invoke-RestMethod -Body $jsonString -ContentType 'application/json'   # 中文变 '?'
 ```
 
-PS 5.1 对没有 `charset` 的 content-type 按 ASCII 编码 body。要么显式加
-`; charset=utf-8` **并传字节数组**，要么就接受模型看不懂中文。
-`ohc-gateway.ps1` 里的自检已经改成传 `[System.Text.Encoding]::UTF8.GetBytes(...)`。
+PS 5.1 对没有 `charset` 的 content-type 按 ASCII 编码 body，要显式加
+`; charset=utf-8` **并传字节数组**。
+
+收回来：
+
+```
+content = "æ¶å°"      ← 这是 "收到"，6 个字符
+```
+
+DeepSeek 上游返回的 `content-type` 只有 `application/json`，不带 charset，
+PS 5.1 就按 **Latin-1** 解码，一个 UTF-8 汉字被拆成两三个乱码字符。
+所以 `ohc-gw.mjs` 里统一给响应补 `; charset=utf-8`，修完 `content.Length = 2`。
+
+VS Code 的插件走 Node 的 fetch，本来就不受影响——只有 PC 侧的自检脚本会被坑，
+很容易误判成「网关把中文搞坏了」。
+
+另外 `Invoke-WebRequest` 的进度条会往控制台乱写，把输出搅成一团，
+脚本开头要 `$ProgressPreference = 'SilentlyContinue'`。
 
 ### 实测记录
 
@@ -693,5 +710,6 @@ healthz                          -> ohc-gw ok
 非流式 chat (max_tokens=800)     -> content=收到, completion=251
 流式 chat (stream=true)          -> 50 个 SSE chunk, 拼出 "1、2、3、4、5"
 max_tokens=64 自动抬升           -> content_len=144（修复前是 0）
+响应补 charset 后                -> content.Length=2, codepoints=25910,21040（收、到）
 ```
 
