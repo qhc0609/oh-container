@@ -128,20 +128,33 @@ function Send-Size([int]$r, [int]$c) {
 }
 
 Write-Step "同步终端尺寸"
+
+# 推给设备的终端尺寸上限。这不是审美问题，是防崩的硬要求：
+# 点「最大化」时窗口宽度会瞬间变成 1904 列（本机最大窗口宽），
+# claude 在 1904 列下重画一次要吐几万字节；等你点「还原」，窗口缩回 80 列，
+# 但那串按 1904 列排版的字节还在路上，hdc 就按 1904 的坐标往已经缩小的
+# 控制台缓冲区里写 -> 越界 -> conhost fail-fast（0xc0000409）。
+# 封顶之后，claude 最多按 200 列排版，最大化和还原之间就不会有
+# 「排版宽度远大于当前缓冲区」的窗口。
+$MaxCols = 200
+$MaxRows = 60
+if ($env:OHC_TTY_MAXCOLS -match '^\d+$') { $MaxCols = [int]$env:OHC_TTY_MAXCOLS }
+if ($env:OHC_TTY_MAXROWS -match '^\d+$') { $MaxRows = [int]$env:OHC_TTY_MAXROWS }
+
 $initR = 30
 $initC = 80
 try {
-    $initR = [Console]::WindowHeight
-    $initC = [Console]::WindowWidth
+    $initR = [Math]::Min([Console]::WindowHeight, $MaxRows)
+    $initC = [Math]::Min([Console]::WindowWidth, $MaxCols)
 } catch { }
 $null = Send-Size $initR $initC
-Write-Ok ("已写入 ${initC}x${initR}（列x行）")
+Write-Ok ("已写入 ${initC}x${initR}（列x行，上限 ${MaxCols}x${MaxRows}）")
 
 $watcher = $null
 if (-not $NoWatcher) {
     $watcher = [PowerShell]::Create()
     $null = $watcher.AddScript({
-        param($hdcPath, $sizeFile, $lastR, $lastC)
+        param($hdcPath, $sizeFile, $lastR, $lastC, $maxR, $maxC)
         $r = $lastR
         $c = $lastC
         $fail = 0
@@ -168,8 +181,11 @@ if (-not $NoWatcher) {
                 if ($due) {
                     $pending = $false
                     $urgent = $false
-                    if ($r -ge 10 -and $c -ge 40) {
-                        [System.IO.File]::WriteAllText($sizeFile, "$r $c`n", [System.Text.Encoding]::ASCII)
+                    # 封顶：绝不把 1904 列这种尺寸推给设备（见上面 $MaxCols 的说明）
+                    $pc = [Math]::Min($c, $maxC)
+                    $pr = [Math]::Min($r, $maxR)
+                    if ($pr -ge 10 -and $pc -ge 40) {
+                        [System.IO.File]::WriteAllText($sizeFile, "$pr $pc`n", [System.Text.Encoding]::ASCII)
                         $pi = New-Object System.Diagnostics.ProcessStartInfo
                         $pi.FileName = $hdcPath
                         $pi.Arguments = "file send `"$sizeFile`" /data/ohc/run/"
@@ -191,9 +207,9 @@ if (-not $NoWatcher) {
                 $fail++
                 if ($fail -ge 5) { break }
             }
-            Start-Sleep -Milliseconds 250
+            Start-Sleep -Milliseconds 100
         }
-    }).AddArgument($Hdc).AddArgument($sizeFile).AddArgument($initR).AddArgument($initC)
+    }).AddArgument($Hdc).AddArgument($sizeFile).AddArgument($initR).AddArgument($initC).AddArgument($MaxRows).AddArgument($MaxCols)
     $null = $watcher.BeginInvoke()
     Write-Ok "窗口尺寸跟随已开启（缩小时立刻生效，放大时等窗口停稳）"
 }
