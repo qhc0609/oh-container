@@ -11,4 +11,7 @@
 # 不打印 "[ohc] 进入容器 ..." 这类日志，让 claude 的输出干净
 export OHC_QUIET=1
 
+# 把 PC 侧窗口尺寸同步到当前 pty（hdc 给的默认是 80x24，写死的）
+[ -x /data/ohc/bin/ohc-tty ] && /data/ohc/bin/ohc-tty
+
 exec /data/ohc/bin/ohc-claude "$@"

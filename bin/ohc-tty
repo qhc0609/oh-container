@@ -1,0 +1,68 @@
+#!/system/bin/sh
+# ohc-tty —— 把 PC 侧窗口尺寸同步到当前 pty
+#
+# 为什么需要它：
+#   hdc 给设备 pty 的尺寸是写死的（环境里 COLUMNS=80 LINES=24），
+#   而且 PowerShell 窗口拖动时 hdc 不会通知设备。
+#   所以 TUI（claude / opencode）永远按 80x24 画，窗口再大也只用到左上角。
+#
+# 怎么做的：
+#   PC 侧 bin/ohc-term.ps1 持续把窗口的「行 列」写进 /data/ohc/run/tty；
+#   这里读出来，用 busybox stty 应用到当前 pty，并起一个后台守护，
+#   窗口一变就跟着改（stty 会触发 SIGWINCH，TUI 自己重画）。
+#
+# 没有 PC 侧配合时，退一步用 busybox resize 直接问终端。
+#   Windows Terminal 会应答 CSI 18 t；老的 conhost 不会，那就保持原样。
+
+TTYF=${OHC_TTYFILE:-/data/ohc/run/tty}
+
+TTYPATH=$(busybox tty 2>/dev/null)
+case "$TTYPATH" in
+    /dev/*) ;;
+    *)      TTYPATH="" ;;
+esac
+
+_apply() {
+    _r=$1
+    _c=$2
+    case "$_r" in ''|*[!0-9]*) return 1 ;; esac
+    case "$_c" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_r" -ge 5 ] && [ "$_c" -ge 20 ] || return 1
+    if [ -n "$TTYPATH" ]; then
+        busybox stty -F "$TTYPATH" rows "$_r" cols "$_c" 2>/dev/null && return 0
+    fi
+    busybox stty rows "$_r" cols "$_c" 2>/dev/null
+}
+
+# 1) 优先用 PC 写下来的尺寸
+_used=0
+if [ -f "$TTYF" ]; then
+    set -- $(cat "$TTYF" 2>/dev/null)
+    if [ -n "${1:-}" ] && [ -n "${2:-}" ]; then
+        if _apply "$1" "$2"; then _used=1; fi
+    fi
+fi
+
+# 2) 没有可用文件，就直接问终端
+if [ "$_used" = "0" ]; then
+    busybox resize -s 2>/dev/null
+fi
+
+# 3) 后台跟随窗口变化；pty 设备消失就退出
+if [ -n "$TTYPATH" ] && [ -f "$TTYF" ]; then
+    (
+        trap '' HUP
+        _last=""
+        while [ -c "$TTYPATH" ]; do
+            _s=$(cat "$TTYF" 2>/dev/null)
+            if [ -n "$_s" ] && [ "$_s" != "$_last" ]; then
+                _last="$_s"
+                set -- $_s
+                case "${1:-}" in ''|*[!0-9]*) continue ;; esac
+                case "${2:-}" in ''|*[!0-9]*) continue ;; esac
+                busybox stty -F "$TTYPATH" rows "$1" cols "$2" 2>/dev/null
+            fi
+            sleep 1
+        done
+    ) >/dev/null 2>&1 &
+fi

@@ -8,6 +8,7 @@
 # 用法：
 #   git add -A
 #   bash scripts/push-via-api.sh "提交信息"
+#   bash scripts/push-via-api.sh -F msg.txt      # 从文件读（消息里有特殊词时用）
 #
 # 依赖：gh（已 gh auth login）、python 或 python3
 #
@@ -29,8 +30,13 @@ REPO="${OHC_REPO:-qhc0609/oh-container}"
 BRANCH="${OHC_BRANCH:-main}"
 
 if [ $# -lt 1 ]; then
-  echo "用法: bash $0 \"<提交信息>\"" >&2
+  echo "用法: bash $0 \"<提交信息>\"  或  bash $0 -F <消息文件>" >&2
   exit 1
+fi
+
+MSG_FILE_ARG=""
+if [ "$1" = "-F" ] && [ $# -ge 2 ]; then
+  MSG_FILE_ARG="$2"
 fi
 
 PY=python
@@ -42,13 +48,26 @@ TMP=$(mktemp -d -p . .tmp-push-XXXXXX)
 trap 'find "$TMP" -type f -delete 2>/dev/null; rmdir "$TMP" 2>/dev/null' EXIT
 
 # 消息原样存文件（避开 shell / 编码问题），并保证以单个 \n 结尾，与 git 提交习惯一致
-"$PY" - "$TMP/msg.txt" "$1" <<'PYEOF'
+if [ -n "$MSG_FILE_ARG" ]; then
+    [ -f "$MSG_FILE_ARG" ] || { echo "消息文件不存在: $MSG_FILE_ARG" >&2; exit 1; }
+    cp "$MSG_FILE_ARG" "$TMP/msg.txt"
+    "$PY" - "$TMP/msg.txt" <<'PYEOF'
+import sys, io
+p = sys.argv[1]
+m = io.open(p, encoding='utf-8', newline='').read()
+if not m.endswith('\n'):
+    m += '\n'
+io.open(p, 'w', encoding='utf-8', newline='').write(m)
+PYEOF
+else
+    "$PY" - "$TMP/msg.txt" "$1" <<'PYEOF'
 import sys, io
 path, msg = sys.argv[1], sys.argv[2]
 if not msg.endswith('\n'):
     msg += '\n'
 io.open(path, 'w', encoding='utf-8', newline='').write(msg)
 PYEOF
+fi
 
 echo "=== 1. 读远端基线 ==="
 BASE_COMMIT=$(gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq '.object.sha')

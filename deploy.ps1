@@ -95,14 +95,14 @@ Write-Ok "rootfs 就绪"
 
 # ------------------------------------------------------------------ 3. 目录
 Write-Step "创建目录"
-& $Hdc shell "mkdir -p /data/ohc/bin /data/ohc/containers/claude /data/ohc/workspace /data/ohc/logs" | Out-Null
+& $Hdc shell "mkdir -p /data/ohc/bin /data/ohc/containers/claude /data/ohc/workspace /data/ohc/logs /data/ohc/run" | Out-Null
 & $Hdc shell "mkdir -p /data/ohc/rootfs/claude/root/.config/opencode" | Out-Null
 & $Hdc shell "mkdir -p /data/python/lib/python3.8/script/bin" | Out-Null
 Write-Ok "/data/ohc 结构就绪"
 
 # ------------------------------------------------------------------ 4. 运行时
 Write-Step "推送容器运行时"
-$binFiles = @("ohc", "ohc-claude", "ohc-setkey", "ohc-verify", "oc-setkey")
+$binFiles = @("ohc", "ohc-claude", "ohc-setkey", "ohc-verify", "oc-setkey", "ohc-tty")
 foreach ($f in $binFiles) {
     $src = Join-Path $RepoRoot "bin\$f"
     if (-not (Test-Path $src)) { Fail "缺文件: $src" }

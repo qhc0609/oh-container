@@ -19,7 +19,9 @@ oh-container/
 │   ├── ohc-claude           启动 claude 的底层入口
 │   ├── ohc-setkey           写入 DeepSeek Key
 │   ├── ohc-verify           端到端自检（配置→依赖→裸接口→claude→TUI）
-│   └── oc-setkey            写入 OpenCode Key
+│   ├── ohc-tty              把 PC 窗口尺寸同步到设备 pty（含后台跟随）
+│   ├── oc-setkey            写入 OpenCode Key
+│   └── ohc-term.ps1         PC 侧启动器：尺寸跟随 + 控制台缓冲区（翻页）
 ├── device-bin/              放到设备 PATH 里的入口脚本
 │   ├── claude
 │   └── opencode
@@ -36,12 +38,21 @@ oh-container/
 ├── scripts/
 │   ├── check-namespace.sh   探测设备 namespace / 权限 / 挂载（换设备先跑这个）
 │   ├── test-deepseek.sh     裸测 DeepSeek 的 Anthropic 兼容端点
+│   ├── push-via-api.sh      github.com 被墙时改走 Git Data API 推送
 │   └── archive/             搭建过程中的一次性探测脚本，原样留档
 ├── articles/                公众号系列文章（5 篇 + 选题库）
 └── deploy.ps1               把运行时 + 配置 + PATH 入口部署到设备
 ```
 
 ## 快速开始
+
+**日常使用（推荐）**
+
+```powershell
+.\bin\ohc-term.ps1
+```
+
+进去后敲 `claude` 或 `opencode`。窗口尺寸会跟着走，历史输出能翻页。
 
 **情况 A：设备上已经有环境（或刚刷完机要恢复）**
 
@@ -210,8 +221,10 @@ CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1
 
 ## 6. 使用（最常用：进去直接敲 claude）
 
+**推荐用启动器**（终端尺寸会跟着窗口走，历史输出能翻页）：
+
 ```powershell
-hdc shell
+.\bin\ohc-term.ps1
 ```
 
 进去后，**在任意目录（包括根目录 `/`）直接敲**：
@@ -221,7 +234,8 @@ claude              # 交互式启动，后端已经是 DeepSeek
 claude -p "你好"    # 单次提问
 ```
 
-就这两条，不需要先切目录、不需要记路径。
+也可以照旧直接 `hdc shell`，只是那样窗口尺寸是 hdc 写死的 80x24，且翻页受限。
+两者的差别见下面「终端尺寸与翻页」。
 
 ### 它是怎么做到"在 / 下也能直接敲 claude"的
 
@@ -235,12 +249,51 @@ claude -p "你好"    # 单次提问
 最后一项 `/data/python/lib/python3.8/script/bin` 落在 `/data` 下，**可写且本来就在 PATH 里**。
 所以把入口脚本放进去即可，不动系统分区、不需要 remount、重启不丢。
 
-入口脚本内容就三行：
+入口脚本内容就几行：
 
 ```sh
 export OHC_QUIET=1
+[ -x /data/ohc/bin/ohc-tty ] && /data/ohc/bin/ohc-tty
 exec /data/ohc/bin/ohc-claude "$@"
 ```
+
+### 终端尺寸与翻页（hdc 的两个坑）
+
+**坑一：窗口尺寸是写死的。**
+`hdc shell` 给设备 pty 的尺寸固定为 80x24（环境里也写死 `COLUMNS=80 LINES=24`），
+拖动 PowerShell 窗口**不会**同步给设备。于是 claude 的 TUI 永远按 80x24 排版，
+窗口再大也只用到左上角，右边和下边空着。
+
+**坑二：翻页。**
+控制台缓冲区若等于窗口高度，滚出屏幕的内容就没地方存，`Shift+PgUp` 翻不到。
+
+修法（`bin/ohc-term.ps1` + `bin/ohc-tty`）：
+
+```
+PC 侧 ohc-term.ps1 ──写「行 列」──▶ /data/ohc/run/tty ──▶ 设备侧 ohc-tty
+                                                          │
+                                              busybox stty -F /dev/pts/N rows R cols C
+                                                          │
+                                                    SIGWINCH → TUI 重画
+```
+
+- PC 侧每 500ms 读一次 `[Console]::WindowHeight/Width`，变了就写一次设备文件
+- 设备侧 `ohc-tty` 在启动时应用一次，并起后台守护每秒比对文件，变了就改 pty
+- 改 pty 尺寸会触发 `SIGWINCH`，claude / opencode 自己重排
+
+实测（容器内 Node 的 `process.stdout.columns`，也就是 ink 排版真正读的值）：
+
+| 写入 `/data/ohc/run/tty` | 容器内 `stty size` | 容器内 `process.stdout` |
+|---|---|---|
+| `40 120` | `40 120` | `120x40` |
+| `28 96` | `28 96` | `96x28` |
+| `52 160` | `52 160` | `160x52` |
+
+翻页：启动器会把控制台缓冲区调到 9001 行，并在后台定期纠正
+（hdc 起会话时可能把缓冲区压回窗口高度）。Windows Terminal 下改不了缓冲区，
+用它自带的 scrollback（设置里调大 history）即可。
+
+> 手动再同步一次尺寸（会话里敲）：`/data/ohc/bin/ohc-tty`
 
 ### 工作目录
 

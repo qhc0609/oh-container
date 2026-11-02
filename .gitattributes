@@ -8,6 +8,7 @@
 # 表现是 "/system/bin/sh^M: bad interpreter"，非常难查
 *.sh  text eol=lf
 bin/* text eol=lf
+bin/*.ps1 text eol=crlf
 device-bin/* text eol=lf
 scripts/archive/*.sh text eol=lf
 
