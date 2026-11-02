@@ -12,6 +12,8 @@
       /data/ohc/containers/claude/env       DeepSeek Key 与模型配置（600 权限）
       /data/ohc/rootfs/claude/root/.config/opencode/opencode.json
       /data/ohc/rootfs/claude/root/.claude.json
+      /data/ohc/rootfs/claude/usr/local/bin/ohc-tmux   容器内滚屏启动器
+      /data/ohc/rootfs/claude/root/.tmux.conf          tmux 配置（5 万行历史）
       /data/python/lib/python3.8/script/bin/claude     PATH 入口
       /data/python/lib/python3.8/script/bin/opencode   PATH 入口
 
@@ -150,6 +152,27 @@ Write-Step "推送容器内配置"
 & $Hdc shell "chmod 644 /data/ohc/rootfs/claude/root/.claude.json /data/ohc/rootfs/claude/root/.config/opencode/opencode.json" | Out-Null
 Write-Ok "opencode.json + .claude.json"
 
+# ------------------------------------------------------------------ 6.5 容器内 tmux（翻屏）
+Write-Step "安装容器内 tmux（翻屏用）"
+$rootfsClaude = "/data/ohc/rootfs/claude"
+$hasTmux = (& $Hdc shell "test -x $rootfsClaude/usr/bin/tmux && echo YES || echo NO" 2>&1) -join ''
+if ($hasTmux -notmatch 'YES') {
+    Write-Warn2 "容器里没有 tmux，尝试用 apk 安装（需要手机能上网）"
+    $r = (& $Hdc shell "chroot $rootfsClaude /bin/sh -c '/sbin/apk add --no-cache tmux ncurses-terminfo-base 2>&1 | tail -4'" 2>&1) -join "`n"
+    Write-Host $r -ForegroundColor DarkGray
+    $hasTmux = (& $Hdc shell "test -x $rootfsClaude/usr/bin/tmux && echo YES || echo NO" 2>&1) -join ''
+    if ($hasTmux -notmatch 'YES') {
+        Write-Warn2 "tmux 安装失败：翻屏会退回宿主控制台（hdc 自己模拟屏幕，基本翻不动）"
+        Write-Warn2 "可以手动在容器里执行：apk add --no-cache tmux ncurses-terminfo-base"
+    }
+}
+& $Hdc shell "mkdir -p $rootfsClaude/usr/local/bin" | Out-Null
+& $Hdc file send (Join-Path $RepoRoot "etc\ohc-tmux") "$rootfsClaude/usr/local/bin/ohc-tmux" | Out-Null
+& $Hdc file send (Join-Path $RepoRoot "etc\tmux.conf") "$rootfsClaude/root/.tmux.conf" | Out-Null
+& $Hdc shell "chmod 755 $rootfsClaude/usr/local/bin/ohc-tmux" | Out-Null
+& $Hdc shell "chmod 644 $rootfsClaude/root/.tmux.conf" | Out-Null
+Write-Ok "ohc-tmux + .tmux.conf"
+
 # ------------------------------------------------------------------ 7. OpenCode key
 if ($OcKey) {
     Write-Step "写入 OpenCode Key"
@@ -209,9 +232,15 @@ Write-Host @"
   claude                 # DeepSeek V4.1-Flash（你自己的 DeepSeek Key）
   opencode               # OpenCode Zen 免费 DeepSeek V4.1-Flash Free
 
+翻屏（claude / opencode 都在 tmux 里跑）：
+  PageUp                 # 直接往上翻，不用按 Ctrl+B
+  q                      # 退出翻页模式
+  Ctrl+B d               # 暂时离开，再敲 claude 会接回同一个会话
+
 其它：
   /data/ohc/bin/ohc doctor            # 环境自检
   /data/ohc/bin/ohc net               # 修复默认路由
   /data/ohc/bin/ohc-setkey sk-xxx     # 换 DeepSeek Key
   /data/ohc/bin/oc-setkey oc_sk-xxx   # 换 OpenCode Key
+  OHC_NO_TMUX=1 claude                # 不进 tmux，直接跑
 "@ -ForegroundColor Gray

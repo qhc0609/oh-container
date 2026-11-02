@@ -15,7 +15,7 @@
 
 export OHC_QUIET=1
 
-# 把 PC 侧窗口尺寸同步到当前 pty（hdc 给的默认是 80x24，写死的）
+# 把宿主机窗口尺寸同步到当前 pty（hdc 给的默认是 80x24，写死的）
 [ -x /data/ohc/bin/ohc-tty ] && /data/ohc/bin/ohc-tty
 
 # opencode run 在非交互环境下会一直等 stdin，这里直接给 /dev/null
@@ -23,4 +23,10 @@ if [ "$1" = "run" ]; then
     exec /data/ohc/bin/ohc run claude -- opencode "$@" < /dev/null
 fi
 
-exec /data/ohc/bin/ohc run claude -- opencode "$@"
+# 交互式 TUI：放进 tmux，历史由 tmux 保存（hdc 在 Windows 控制台上自己模拟
+# 固定尺寸屏幕，超屏的行不会进终端回滚区，详见 etc/ohc-tmux 顶部注释）
+if [ "${OHC_NO_TMUX:-0}" = "1" ] || [ ! -x /data/ohc/rootfs/claude/usr/local/bin/ohc-tmux ]; then
+    exec /data/ohc/bin/ohc run claude -- opencode "$@"
+fi
+
+exec /data/ohc/bin/ohc run claude -- /usr/local/bin/ohc-tmux opencode "$@"

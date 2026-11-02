@@ -6,24 +6,22 @@
 .DESCRIPTION
     hdc 给设备 pty 的尺寸是写死的（环境里 COLUMNS=80 LINES=24），
     PowerShell 窗口拖动时 hdc 也不会通知设备，所以 claude / opencode
-    的 TUI 永远按 80x24 画，窗口再大也只用到左上角。
+    的 TUI 永远按 80x24 画。
 
-    本脚本做两件事：
-      1. 把 PowerShell 窗口的「行 列」写到设备的 /data/ohc/run/tty，
-         设备侧 ohc-tty 用 busybox stty 应用到 pty；
-         窗口变化时再写一次（stty 触发 SIGWINCH，TUI 自己重画）。
-      2. 把控制台缓冲区调高，让滚出屏幕的历史输出能翻页（conhost 有效）。
+    本脚本只做一件事：把**宿主机控制台**（PowerShell / cmd 窗口）的
+    「行 列」写到设备的 /data/ohc/run/tty，设备侧 ohc-tty 用 busybox stty
+    应用到 pty；窗口变化时再写一次（stty 触发 SIGWINCH，TUI 自己重画）。
 
-    启动后你在里面照常敲 claude 或 opencode。
+    注意这里**故意不碰控制台缓冲区**（以前设过 BufferHeight = 9001）：
+      - 它救不了 claude 的翻屏。hdc 用 SetConsoleCursorPosition 在控制台上
+        自己模拟一块固定尺寸的屏幕，超屏的行压根没写进缓冲区。
+        翻屏靠容器内的 tmux，见 etc/ohc-tmux。
+      - 它会**把窗口搞崩**。窗口放大后 WindowWidth 会超过原来的 80，
+        而缓冲区宽度还是 80，此时再设 BufferHeight 就是非法状态，
+        conhost 会直接把整个窗口干掉（表现就是"放大缩小后必闪退"）。
 
 .PARAMETER Hdc
     hdc.exe 路径，默认自动查找。
-
-.PARAMETER BufferHeight
-    控制台缓冲区行数，默认 9001。设为 0 可跳过。
-
-.PARAMETER NoBuffer
-    不调整控制台缓冲区（Windows Terminal 下本来也不需要）。
 
 .PARAMETER NoWatcher
     只在启动时同步一次尺寸，不跟随窗口变化。
@@ -32,14 +30,13 @@
     只做检查和尺寸同步，不进入交互会话。用来确认配置对不对。
 
 .PARAMETER Quiet
-    只报错误，不打印过程。供 ohc-profile.ps1 装的 hdc 包装函数使用，
-    这样你敲 hdc shell 时看到的还是原来那个干净界面。
+    只报错误，不打印过程。供 ohc-profile.ps1 装的 hdc 包装函数使用。
 
 .EXAMPLE
     .\bin\ohc-term.ps1
 
 .EXAMPLE
-    .\bin\ohc-term.ps1 -NoBuffer
+    .\bin\ohc-term.ps1 -NoWatcher
 
 .EXAMPLE
     .\bin\ohc-term.ps1 -Quiet
@@ -47,14 +44,15 @@
 [CmdletBinding()]
 param(
     [string]$Hdc = "",
-    [int]$BufferHeight = 9001,
-    [switch]$NoBuffer,
     [switch]$NoWatcher,
     [switch]$DryRun,
     [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 想彻底关掉后台跟随（怀疑它影响稳定性时）：$env:OHC_NO_WATCHER = "1"
+if ($env:OHC_NO_WATCHER -eq '1') { $NoWatcher = $true }
 
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
@@ -95,33 +93,21 @@ if ($hasTty -notmatch 'YES') {
     Write-Warn2 "先跑一次 .\deploy.ps1 把运行时补齐"
 }
 
-# ------------------------------------------------------------------ 3. 缓冲区（为了能翻页）
-if (-not $NoBuffer -and $BufferHeight -gt 0) {
-    Write-Step "调整控制台缓冲区（翻页用）"
-    try {
-        $before = [Console]::BufferHeight
-        if ($before -lt $BufferHeight) {
-            [Console]::BufferHeight = $BufferHeight
-            Write-Ok ("缓冲区 " + $before + " -> " + [Console]::BufferHeight + " 行")
-        } else {
-            Write-Ok ("缓冲区已是 " + $before + " 行，无需调整")
-        }
-    } catch {
-        Write-Warn2 "当前终端不支持改缓冲区（Windows Terminal 常见），跳过"
-        Write-Warn2 "翻页用 Shift+PgUp / 鼠标滚轮；WT 里可在设置里调大 scrollback"
-    }
-}
+# ------------------------------------------------------------------ 3. 尺寸同步
+# 用 hdc file send 推一个内容为「行 列」的小文件，而不是 hdc shell "echo >"：
+# file send 不碰控制台的 mode / 缓冲区，对前台会话干扰最小。
+# 本地文件名必须叫 tty，因为 hdc 只会按原名把文件放进目标目录。
+$sizeDir = Join-Path $env:TEMP "ohc-size"
+if (-not (Test-Path $sizeDir)) { New-Item -ItemType Directory -Force -Path $sizeDir | Out-Null }
+$sizeFile = Join-Path $sizeDir "tty"
 
-# ------------------------------------------------------------------ 4. 尺寸同步
-# 关键：把子进程的 stdin/stdout/stderr 全部重定向到管道，
-# 它就拿不到控制台句柄，不会把前台会话的 raw 模式改回去。
 function Send-Size([int]$r, [int]$c) {
-    if ($r -lt 5 -or $c -lt 20) { return }
-    $arg = "echo '$r $c' > /data/ohc/run/tty"
+    if ($r -lt 5 -or $c -lt 20) { return $false }
     try {
+        [System.IO.File]::WriteAllText($sizeFile, "$r $c`n", [System.Text.Encoding]::ASCII)
         $pi = New-Object System.Diagnostics.ProcessStartInfo
         $pi.FileName = $Hdc
-        $pi.Arguments = "shell `"$arg`""
+        $pi.Arguments = "file send `"$sizeFile`" /data/ohc/run/"
         $pi.UseShellExecute = $false
         $pi.CreateNoWindow = $true
         $pi.RedirectStandardInput = $true
@@ -129,11 +115,13 @@ function Send-Size([int]$r, [int]$c) {
         $pi.RedirectStandardError = $true
         $p = [System.Diagnostics.Process]::Start($pi)
         try { $p.StandardInput.Close() } catch { }
-        if (-not $p.WaitForExit(3000)) { try { $p.Kill() } catch { } }
+        $ok = $p.WaitForExit(3000)
+        if (-not $ok) { try { $p.Kill() } catch { } }
+        $rc = if ($ok) { $p.ExitCode } else { -1 }
         try { $p.Dispose() } catch { }
+        return ($rc -eq 0)
     } catch {
-        # 退路：直接调，出错也不影响会话
-        try { & $Hdc shell "$arg" 2>&1 | Out-Null } catch { }
+        return $false
     }
 }
 
@@ -144,31 +132,29 @@ try {
     $initR = [Console]::WindowHeight
     $initC = [Console]::WindowWidth
 } catch { }
-Send-Size $initR $initC
+$null = Send-Size $initR $initC
 Write-Ok ("已写入 ${initC}x${initR}（列x行）")
-
-$bufTarget = 0
-if (-not $NoBuffer) { $bufTarget = $BufferHeight }
 
 $watcher = $null
 if (-not $NoWatcher) {
     $watcher = [PowerShell]::Create()
     $null = $watcher.AddScript({
-        param($hdcPath, $lastR, $lastC, $bufTarget)
+        param($hdcPath, $sizeFile, $lastR, $lastC)
         $r = $lastR
         $c = $lastC
-        $tick = 0
+        $fail = 0
         while ($true) {
             try {
+                # 只读控制台，不改任何状态
                 $nr = [Console]::WindowHeight
                 $nc = [Console]::WindowWidth
                 if (($nr -ne $r -or $nc -ne $c) -and $nr -ge 5 -and $nc -ge 20) {
                     $r = $nr
                     $c = $nc
-                    $arg = "echo '$r $c' > /data/ohc/run/tty"
+                    [System.IO.File]::WriteAllText($sizeFile, "$nr $nc`n", [System.Text.Encoding]::ASCII)
                     $pi = New-Object System.Diagnostics.ProcessStartInfo
                     $pi.FileName = $hdcPath
-                    $pi.Arguments = "shell `"$arg`""
+                    $pi.Arguments = "file send `"$sizeFile`" /data/ohc/run/"
                     $pi.UseShellExecute = $false
                     $pi.CreateNoWindow = $true
                     $pi.RedirectStandardInput = $true
@@ -176,34 +162,29 @@ if (-not $NoWatcher) {
                     $pi.RedirectStandardError = $true
                     $p = [System.Diagnostics.Process]::Start($pi)
                     try { $p.StandardInput.Close() } catch { }
-                    $null = $p.WaitForExit(2000)
-                    if (-not $p.HasExited) { try { $p.Kill() } catch { } }
+                    if (-not $p.WaitForExit(3000)) { try { $p.Kill() } catch { } }
+                    $rc = $p.ExitCode
                     try { $p.Dispose() } catch { }
+                    if ($rc -ne 0) { $fail++ } else { $fail = 0 }
+                    if ($fail -ge 5) { break }
                 }
-                # hdc 起会话时可能把缓冲区压回窗口高度，导致翻页失效，这里定期纠正
-                $tick++
-                if ($bufTarget -gt 0 -and ($tick % 4) -eq 0) {
-                    try {
-                        if ([Console]::BufferHeight -lt $bufTarget) {
-                            [Console]::BufferHeight = $bufTarget
-                        }
-                    } catch { }
-                }
-            } catch { }
-            Start-Sleep -Milliseconds 500
+            } catch {
+                $fail++
+                if ($fail -ge 5) { break }
+            }
+            Start-Sleep -Milliseconds 600
         }
-    }).AddArgument($Hdc).AddArgument($initR).AddArgument($initC).AddArgument($bufTarget)
+    }).AddArgument($Hdc).AddArgument($sizeFile).AddArgument($initR).AddArgument($initC)
     $null = $watcher.BeginInvoke()
     Write-Ok "窗口尺寸跟随已开启（拖动窗口后约 1 秒生效）"
 }
 
-# ------------------------------------------------------------------ 5. 交互会话
+# ------------------------------------------------------------------ 4. 交互会话
 if ($DryRun) {
     Start-Sleep -Milliseconds 900
     Write-Step "DryRun 校验"
     $got = (& $Hdc shell "cat /data/ohc/run/tty 2>/dev/null" 2>&1) -join ''
     Write-Ok ("设备侧 /data/ohc/run/tty = " + $got.Trim())
-    $sz = (& $Hdc shell "busybox stty -F /dev/pts/0 size 2>/dev/null; echo -" 2>&1) -join ' '
     Write-Ok ("本机窗口 = " + [Console]::WindowWidth + "x" + [Console]::WindowHeight + "（列x行）")
     if ($watcher) { try { $watcher.Stop() } catch { }; try { $watcher.Dispose() } catch { } }
     Write-Host ""
@@ -214,7 +195,7 @@ if ($DryRun) {
 if (-not $Quiet) {
     Write-Host ""
     Write-Host "  进去后直接敲 claude 或 opencode" -ForegroundColor Gray
-    Write-Host "  手动再同步一次尺寸：  /data/ohc/bin/ohc-tty" -ForegroundColor Gray
+    Write-Host "  翻屏：PageUp，或 Ctrl+B 然后 [（q 退出翻页）" -ForegroundColor Gray
     Write-Host "  退出会话（exit 或 Ctrl+D）后，尺寸跟随自动停止" -ForegroundColor Gray
     Write-Host ""
 }

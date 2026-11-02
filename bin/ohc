@@ -116,6 +116,14 @@ cmd_inner() {
     mount --rbind /dev "$_rootfs/dev" 2>/dev/null \
         || mount --bind /dev "$_rootfs/dev" 2>/dev/null \
         || log "警告: 挂载 /dev 失败"
+
+    # devpts 单独再挂一次。--rbind 在本机实测会退化成 --bind（submount 没带进来），
+    # 结果容器里 /dev/pts 是空目录：claude 自己的 tty 能用（那是 hdc 给的 pty），
+    # 但任何要**新建** pty 的程序（tmux / script）会报 fork failed: No such device。
+    # 这里不指定 newinstance，和宿主的 /dev/ptmx 属于同一个实例，才能正常开 pty。
+    mount -t devpts -o gid=5,mode=620,ptmxmode=666 devpts "$_rootfs/dev/pts" 2>/dev/null \
+        || log "警告: 挂载 devpts 失败（tmux 可能不可用）"
+
     mount -t tmpfs tmpfs "$_rootfs/tmp" 2>/dev/null \
         || log "警告: 挂载 /tmp 失败"
 

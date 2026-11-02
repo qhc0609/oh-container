@@ -1,0 +1,58 @@
+#!/bin/sh
+# ohc-tmux —— 在 tmux 里跑命令，给容器内一个「自带回滚」的终端
+#
+# 为什么需要它（这是翻不了屏的真正原因）：
+#   hdc 在 Windows 控制台上不是老实写字节流，而是用
+#   SetConsoleCursorPosition / GetConsoleScreenBufferInfo / SetConsoleTextAttribute
+#   自己模拟一块「固定尺寸」的屏幕（在 hdc.exe 里能 grep 到这几个 API）。
+#   所以超出窗口高度的行会被它直接覆盖，压根不会进终端的回滚区——
+#   把控制台缓冲区调到 30000 行也没用，因为那些行从来没被写进缓冲区。
+#   tmux 自己保存历史（history-limit），跟宿主终端是什么、缓冲区多大都无关。
+#
+# 用法：
+#   ohc-tmux <命令> [参数...]
+#   ohc-tmux                       # 进一个交互 sh
+#   滚屏：PageUp 直接往上翻（不需要按 Ctrl+B）；q 退出；Ctrl+B d 断开
+
+set -u
+
+# hdc 给的是 TERM=linux，tmux 查 terminfo 和上色都不够用
+case "${TERM:-}" in
+    ''|linux|dumb|vt100) TERM=xterm-256color; export TERM ;;
+esac
+
+SESS=${OHC_TMUX_SESSION:-claude}
+
+# tmux 的 socket 默认放 /tmp，但 ohc 每次进来都会给 /tmp 挂一个新的 tmpfs，
+# 于是每次都是一个全新的 tmux 服务端，-A 永远接不上上一次的会话。
+# 放到 /work（绑定到宿主 /data/ohc/workspace，重启不丢）就能真正续上。
+if [ -d /work ]; then
+    mkdir -p /work/.tmux 2>/dev/null && chmod 700 /work/.tmux 2>/dev/null \
+        && TMUX_TMPDIR=/work/.tmux && export TMUX_TMPDIR
+fi
+
+if [ "$#" -eq 0 ]; then
+    set -- /bin/sh
+fi
+
+_name=$1
+shift
+
+# tmux 的 new-session 只接受「一个命令字符串」，不是 argv，
+# 所以这里逐个别名转义后拼成单引号包裹的串，避免参数里有空格/引号时被拆错。
+_cmd=""
+for _a in "$@"; do
+    _q=$(printf '%s' "$_a" | sed "s/'/'\\\\''/g")
+    _cmd="$_cmd '$_q'"
+done
+_cmd="'$_name'$_cmd"
+
+# 调试用：只打印拼好的命令串，不进 tmux
+if [ "${OHC_TMUX_DRY:-0}" = "1" ]; then
+    printf '%s\n' "$_cmd"
+    exit 0
+fi
+
+# -A：已有同名会话就直接接上（意外断开后还能回来接着看）
+# -u：强制 UTF-8
+exec tmux -u new-session -A -s "$SESS" "$_cmd"

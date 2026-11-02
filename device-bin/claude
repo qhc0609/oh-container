@@ -11,7 +11,20 @@
 # 不打印 "[ohc] 进入容器 ..." 这类日志，让 claude 的输出干净
 export OHC_QUIET=1
 
-# 把 PC 侧窗口尺寸同步到当前 pty（hdc 给的默认是 80x24，写死的）
+# 把宿主机窗口尺寸同步到当前 pty（hdc 给的默认是 80x24，写死的）
 [ -x /data/ohc/bin/ohc-tty ] && /data/ohc/bin/ohc-tty
 
-exec /data/ohc/bin/ohc-claude "$@"
+# -p / --print 是一次性输出，不需要 tmux，也别留会话
+case " $* " in
+    *" -p "*|*" --print "*)
+        exec /data/ohc/bin/ohc-claude "$@" < /dev/null ;;
+esac
+
+# 交互式：放进 tmux。
+# 原因见 etc/ohc-tmux 顶部注释——hdc 在 Windows 控制台上自己模拟固定尺寸屏幕，
+# 超屏的行不会进终端回滚区，所以只能让 tmux 在容器里存历史。
+if [ "${OHC_NO_TMUX:-0}" = "1" ] || [ ! -x /data/ohc/rootfs/claude/usr/local/bin/ohc-tmux ]; then
+    exec /data/ohc/bin/ohc-claude "$@"
+fi
+
+exec /data/ohc/bin/ohc run claude -- /usr/local/bin/ohc-tmux claude "$@"

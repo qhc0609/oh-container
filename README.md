@@ -29,7 +29,9 @@ oh-container/
 ├── etc/                     配置模板
 │   ├── claude.env           DeepSeek 端点 / 模型 / 超时等
 │   ├── claude.json          .claude.json 种子（跳过引导、信任目录）
-│   └── opencode.json        默认模型（免费 DeepSeek）
+│   ├── opencode.json        默认模型（免费 DeepSeek）
+│   ├── ohc-tmux             容器内滚屏启动器（部署到 /usr/local/bin）
+│   └── tmux.conf            tmux 配置：5 万行历史 + PageUp 直接翻页
 ├── backup/                  备份与一键恢复
 │   ├── restore.ps1          刷机后恢复（推包 → 解压 → 修权限 → 验证）
 │   ├── backup.ps1           重新打包
@@ -291,8 +293,51 @@ exec /data/ohc/bin/ohc-claude "$@"
 关键认知：**尺寸必须来自 hdc 之外那个宿主机控制台**（PowerShell / cmd 的窗口），
 而不是 hdc shell 里那个假的 80x24。hdc 自己不读、也不转发，只能由 PC 侧读出来再送进去。
 
-**坑二：翻页。**
-控制台缓冲区若等于窗口高度，滚出屏幕的内容就没地方存，`Shift+PgUp` 翻不到。
+**坑二：翻屏——加缓冲区没用，因为行根本没进缓冲区。**
+
+这一条和「窗口尺寸」是两回事，别混在一起。`hdc.exe` 里能 grep 到
+`GetConsoleScreenBufferInfo` / `SetConsoleCursorPosition` / `SetConsoleTextAttribute`：
+它**不是老实写字节流**，而是在 Windows 控制台上自己模拟一块「固定尺寸」的屏幕。
+超出窗口高度的行被它直接覆盖，从来没写进控制台的缓冲区——
+所以把 `BufferHeight` 调到 30000 也翻不到，那里根本没有那些行。
+
+修法：**在容器里跑 tmux**，历史由 tmux 自己存（`history-limit 50000`），
+和宿主终端是什么、缓冲区多大都无关。
+
+```
+claude ──▶ ohc run claude ──▶ tmux（容器内）──▶ claude
+                                   │
+                        历史存在 /tmp 里的 tmux 服务端
+                        PageUp 直接翻，不用按 Ctrl+B
+```
+
+配套改动：
+
+- `etc/ohc-tmux` → 容器内 `/usr/local/bin/ohc-tmux`，把 argv 逐个转义后交给
+  `tmux new-session -A`（`-A`：已有会话就接上，断开后还能回来）
+- `etc/tmux.conf` → 容器内 `/root/.tmux.conf`：5 万行历史、鼠标、`PageUp` 直接翻页
+- `device-bin/claude`、`device-bin/opencode`：交互式走 tmux，`-p` / `run` 仍直接跑；
+  `OHC_NO_TMUX=1` 可关掉
+- `bin/ohc`：容器内**单独挂一次 devpts**。实测 `mount --rbind /dev` 在本机会退化成
+  `--bind`，submount 没带进来，`/dev/pts` 是空目录 → tmux 报
+  `create window failed: fork failed: No such device`。不指定 `newinstance`，
+  和宿主的 `/dev/ptmx` 同实例，才能正常开 pty
+
+实测（真实 pty 里跑容器）：
+
+| 项 | 结果 |
+|---|---|
+| 可见区 | 24 行 |
+| `tmux capture-pane -S -300` 抓到的历史 | **201 行** |
+| 最早一行 `1` 是否还在 | **FOUND_LINE_1** |
+| tmux 配置 | `history-limit 50000` / `mouse on` / `xterm-256color` |
+| 参数转义（空格 / 单引号 / 双引号 / 分号） | 全部原样还原，`GOT:[x y z]` |
+| `claude --version` / `opencode --version` 在 tmux 里 | 正常输出 2.1.x / 1.19.x |
+
+> 用 `busybox resize` 兜底那条路也试过：它本该发 CSI 18 t 问终端尺寸，
+> 但这台设备上一次都没发出去，已删掉（详见上一节）。
+
+### 窗口尺寸同步（`ohc-tty`）
 
 修法（`bin/ohc-profile.ps1` + `bin/ohc-term.ps1` + `bin/ohc-tty`）：
 
@@ -308,7 +353,7 @@ PowerShell 窗口 [Console]::WindowWidth/Height
 - `bin/ohc-profile.ps1` 装一层同名包装：PowerShell 里是 `function hdc`，
   cmd 里是 `%LOCALAPPDATA%\oh-container\hdc.cmd`。
   拦到「`hdc shell` 且不带命令」时改走启动器，其它子命令原样透传给真 hdc
-- `bin/ohc-term.ps1` 读宿主机控制台尺寸，写设备文件；同时把控制台缓冲区调到 9001 行
+- `bin/ohc-term.ps1` 读宿主机控制台尺寸，写设备文件
 - `bin/ohc-tty` 启动时应用一次，并起后台守护每秒比对文件，变了就改 pty
 
 实测（容器内 Node 的 `process.stdout.columns`，也就是 ink 排版真正读的值）：
@@ -318,10 +363,6 @@ PowerShell 窗口 [Console]::WindowWidth/Height
 | `40 120` | `40 120` | `120x40` |
 | `28 96` | `28 96` | `96x28` |
 | `52 160` | `52 160` | `160x52` |
-
-翻页：启动器会把控制台缓冲区调到 9001 行，并在后台定期纠正
-（hdc 起会话时可能把缓冲区压回窗口高度）。Windows Terminal 下改不了缓冲区，
-用它自带的 scrollback（设置里调大 history）即可。
 
 > 试过但**没用**的路：`busybox resize` 会发 CSI 18 t 问终端尺寸，理论上很优雅。
 > 用真实 pty 抓字节流实测，这台设备上它**一次都没发出询问**、也不输出结果，
