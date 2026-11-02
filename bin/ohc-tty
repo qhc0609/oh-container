@@ -1,20 +1,29 @@
 #!/system/bin/sh
-# ohc-tty —— 把 PC 侧窗口尺寸同步到当前 pty
+# ohc-tty —— 把「宿主机控制台」的窗口尺寸同步到当前 pty
 #
-# 为什么需要它：
+# 问题根结：
 #   hdc 给设备 pty 的尺寸是写死的（环境里 COLUMNS=80 LINES=24），
-#   而且 PC 窗口拖动时 hdc 不会通知设备。
-#   所以 TUI（claude / opencode）永远按 80x24 画，窗口再大也只用到左上角。
+#   而且它既不读宿主机控制台、也不转发窗口变化。
+#   所以容器里的 TUI（claude / opencode）永远按 80x24 排版，
+#   PowerShell 窗口拖多大都只用到左上角。
 #
-# 怎么做的：
-#   PC 侧 bin/ohc-term.ps1 持续把窗口的「行 列」写进 /data/ohc/run/tty；
-#   这里读出来，用 busybox stty 应用到当前 pty，并起一个后台守护，
-#   窗口一变就跟着改（stty 会触发 SIGWINCH，TUI 自己重画）。
+#   注意：这里要的是 hdc 之外那个 PowerShell / cmd 窗口的尺寸，
+#   不是 hdc shell 里那个假的 80x24。
 #
-# 没有 PC 侧配合时，退一步用 busybox resize 直接问终端（带 2 秒超时）。
-#   Windows Terminal 会应答 CSI 18 t；老的 conhost 不会，那就保持原样。
+# 谁来提供尺寸：
+#   PC 侧 bin/ohc-term.ps1 读 [Console]::WindowWidth/WindowHeight，
+#   写进 /data/ohc/run/tty（内容是「行 列」）。
+#   本脚本读出来，用 busybox stty 应用到当前 pty；
+#   再起一个后台守护，文件一变就跟着改（stty 触发 SIGWINCH，TUI 自己重画）。
+#
+# 为什么不再用 busybox resize 兜底：
+#   实测这台设备上 busybox resize 既不输出结果、也不发 CSI 18 t 询问终端
+#   （用真实 pty 抓过字节流，0 次询问）。留着只会让启动白等 2 秒，已删。
+#   所以尺寸只有两个来源：文件（首选），或保持 pty 原值。
 
 TTYF=${OHC_TTYFILE:-/data/ohc/run/tty}
+MAXAGE=${OHC_TTY_MAXAGE:-300}
+LOG=/data/ohc/logs/tty.log
 
 TTYPATH=$(busybox tty 2>/dev/null)
 case "$TTYPATH" in
@@ -34,33 +43,31 @@ _apply() {
     busybox stty rows "$_r" cols "$_c" 2>/dev/null
 }
 
-# 1) 优先用 PC 写下来的尺寸
-_used=0
+# 文件是否「刚被宿主机写过」。过期只用来记一条日志，
+# 不影响取值：旧尺寸也比死守 80x24 强。
+_age() {
+    [ -f "$TTYF" ] || { echo -1; return; }
+    _now=$(busybox date +%s 2>/dev/null)
+    case "$_now" in ''|*[!0-9]*) echo -1; return ;; esac
+    _mt=$(busybox stat -c %Y "$TTYF" 2>/dev/null)
+    case "$_mt" in ''|*[!0-9]*) echo -1; return ;; esac
+    echo $((_now - _mt))
+}
+
 if [ -f "$TTYF" ]; then
     set -- $(cat "$TTYF" 2>/dev/null)
     if [ -n "${1:-}" ] && [ -n "${2:-}" ]; then
-        if _apply "$1" "$2"; then _used=1; fi
+        if _apply "$1" "$2"; then
+            _a=$(_age)
+            if [ "$_a" -gt "$MAXAGE" ] 2>/dev/null; then
+                mkdir -p "$(dirname "$LOG")" 2>/dev/null
+                echo "$(date '+%F %T') stale size file: ${1}x${2}, age=${_a}s" >> "$LOG" 2>/dev/null
+            fi
+        fi
     fi
 fi
 
-# 2) 没有可用文件，就直接问终端
-#    busybox resize 会发 CSI 18 t 问终端尺寸；Windows Terminal 会应答，老 conhost 不会。
-#    加 timeout 防止终端不应答时卡住启动。注意不能用 resize -s：
-#    它内部要调 stty，而宿主机上没有 stty。
-if [ "$_used" = "0" ]; then
-    _rd=$(busybox timeout 2 busybox resize 2>/dev/null)
-    case "$_rd" in
-        *COLUMNS=*LINES=*)
-            _c=${_rd#*COLUMNS=}
-            _c=${_c%%[!0-9]*}
-            _r=${_rd#*LINES=}
-            _r=${_r%%[!0-9]*}
-            _apply "$_r" "$_c"
-            ;;
-    esac
-fi
-
-# 3) 后台跟随窗口变化；pty 设备消失就退出
+# 后台跟随窗口变化；pty 设备消失就退出
 if [ -n "$TTYPATH" ] && [ -f "$TTYF" ]; then
     (
         trap '' HUP

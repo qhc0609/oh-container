@@ -19,9 +19,10 @@ oh-container/
 │   ├── ohc-claude           启动 claude 的底层入口
 │   ├── ohc-setkey           写入 DeepSeek Key
 │   ├── ohc-verify           端到端自检（配置→依赖→裸接口→claude→TUI）
-│   ├── ohc-tty              把 PC 窗口尺寸同步到设备 pty（含后台跟随）
+│   ├── ohc-tty              把宿主机窗口尺寸同步到设备 pty（含后台跟随）
 │   ├── oc-setkey            写入 OpenCode Key
-│   └── ohc-term.ps1         PC 侧启动器：尺寸跟随 + 控制台缓冲区（翻页）
+│   ├── ohc-term.ps1         PC 侧启动器：读宿主机窗口尺寸 + 控制台缓冲区（翻页）
+│   └── ohc-profile.ps1      一次性安装 hdc 包装层，让 hdc shell 自动带尺寸
 ├── device-bin/              放到设备 PATH 里的入口脚本
 │   ├── claude
 │   └── opencode
@@ -46,10 +47,18 @@ oh-container/
 
 ## 快速开始
 
-**日常使用（推荐）**
+**第一次：装一次包装层（让 `hdc shell` 带上宿主机窗口尺寸）**
 
 ```powershell
-.\bin\ohc-term.ps1
+.\bin\ohc-profile.ps1
+```
+
+装完重开一个 PowerShell 窗口。
+
+**日常使用**
+
+```powershell
+hdc shell
 ```
 
 进去后敲 `claude` 或 `opencode`。窗口尺寸会跟着走，历史输出能翻页。
@@ -221,10 +230,16 @@ CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1
 
 ## 6. 使用（最常用：进去直接敲 claude）
 
-**推荐用启动器**（终端尺寸会跟着窗口走，历史输出能翻页）：
+**先做一次性安装**，让 `hdc shell` 自动带上宿主机窗口尺寸（PowerShell 和 cmd 都支持）：
 
 ```powershell
-.\bin\ohc-term.ps1
+.\bin\ohc-profile.ps1
+```
+
+装完重开一个 PowerShell 窗口。之后**照旧用 `hdc shell`**：
+
+```powershell
+hdc shell
 ```
 
 进去后，**在任意目录（包括根目录 `/`）直接敲**：
@@ -234,8 +249,15 @@ claude              # 交互式启动，后端已经是 DeepSeek
 claude -p "你好"    # 单次提问
 ```
 
-也可以照旧直接 `hdc shell`，只是那样窗口尺寸是 hdc 写死的 80x24，且翻页受限。
-两者的差别见下面「终端尺寸与翻页」。
+窗口尺寸会跟着 PowerShell 窗口走，历史输出能翻页。原理见下面「终端尺寸与翻页」。
+
+不想装包装层也可以直接跑启动器（效果一样，只是要记一个新命令）：
+
+```powershell
+.\bin\ohc-term.ps1
+```
+
+卸载包装层：`.\bin\ohc-profile.ps1 -Uninstall`
 
 ### 它是怎么做到"在 / 下也能直接敲 claude"的
 
@@ -259,27 +281,35 @@ exec /data/ohc/bin/ohc-claude "$@"
 
 ### 终端尺寸与翻页（hdc 的两个坑）
 
-**坑一：窗口尺寸是写死的。**
-`hdc shell` 给设备 pty 的尺寸固定为 80x24（环境里也写死 `COLUMNS=80 LINES=24`），
-拖动 PowerShell 窗口**不会**同步给设备。于是 claude 的 TUI 永远按 80x24 排版，
-窗口再大也只用到左上角，右边和下边空着。
+**坑一：窗口尺寸是写死的，而且拿错了源。**
+
+`hdc shell` 给设备 pty 的尺寸固定 80x24，环境里也写死 `COLUMNS=80 LINES=24`，
+而且**它会覆盖你传进去的值**——实测 `COLUMNS=133 LINES=44 hdc shell` 进去仍是 `80 24`。
+拖动 PowerShell 窗口也**不会**通知设备。于是 claude 的 TUI 永远按 80x24 排版，
+窗口再大也只用到左上角。
+
+关键认知：**尺寸必须来自 hdc 之外那个宿主机控制台**（PowerShell / cmd 的窗口），
+而不是 hdc shell 里那个假的 80x24。hdc 自己不读、也不转发，只能由 PC 侧读出来再送进去。
 
 **坑二：翻页。**
 控制台缓冲区若等于窗口高度，滚出屏幕的内容就没地方存，`Shift+PgUp` 翻不到。
 
-修法（`bin/ohc-term.ps1` + `bin/ohc-tty`）：
+修法（`bin/ohc-profile.ps1` + `bin/ohc-term.ps1` + `bin/ohc-tty`）：
 
 ```
-PC 侧 ohc-term.ps1 ──写「行 列」──▶ /data/ohc/run/tty ──▶ 设备侧 ohc-tty
-                                                          │
-                                              busybox stty -F /dev/pts/N rows R cols C
-                                                          │
-                                                    SIGWINCH → TUI 重画
+PowerShell 窗口 [Console]::WindowWidth/Height
+        │  每 500ms 轮询，变化才写
+        ▼
+/data/ohc/run/tty  （内容：行 列）
+        ▼
+设备侧 ohc-tty ── busybox stty -F /dev/pts/N rows R cols C ──▶ SIGWINCH ──▶ TUI 重画
 ```
 
-- PC 侧每 500ms 读一次 `[Console]::WindowHeight/Width`，变了就写一次设备文件
-- 设备侧 `ohc-tty` 在启动时应用一次，并起后台守护每秒比对文件，变了就改 pty
-- 改 pty 尺寸会触发 `SIGWINCH`，claude / opencode 自己重排
+- `bin/ohc-profile.ps1` 装一层同名包装：PowerShell 里是 `function hdc`，
+  cmd 里是 `%LOCALAPPDATA%\oh-container\hdc.cmd`。
+  拦到「`hdc shell` 且不带命令」时改走启动器，其它子命令原样透传给真 hdc
+- `bin/ohc-term.ps1` 读宿主机控制台尺寸，写设备文件；同时把控制台缓冲区调到 9001 行
+- `bin/ohc-tty` 启动时应用一次，并起后台守护每秒比对文件，变了就改 pty
 
 实测（容器内 Node 的 `process.stdout.columns`，也就是 ink 排版真正读的值）：
 
@@ -293,6 +323,10 @@ PC 侧 ohc-term.ps1 ──写「行 列」──▶ /data/ohc/run/tty ──▶ 
 （hdc 起会话时可能把缓冲区压回窗口高度）。Windows Terminal 下改不了缓冲区，
 用它自带的 scrollback（设置里调大 history）即可。
 
+> 试过但**没用**的路：`busybox resize` 会发 CSI 18 t 问终端尺寸，理论上很优雅。
+> 用真实 pty 抓字节流实测，这台设备上它**一次都没发出询问**、也不输出结果，
+> 只会让启动白等 2 秒，已从 `ohc-tty` 里删掉。
+>
 > 手动再同步一次尺寸（会话里敲）：`/data/ohc/bin/ohc-tty`
 
 ### 工作目录

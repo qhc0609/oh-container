@@ -28,27 +28,39 @@
 .PARAMETER NoWatcher
     只在启动时同步一次尺寸，不跟随窗口变化。
 
+.PARAMETER DryRun
+    只做检查和尺寸同步，不进入交互会话。用来确认配置对不对。
+
+.PARAMETER Quiet
+    只报错误，不打印过程。供 ohc-profile.ps1 装的 hdc 包装函数使用，
+    这样你敲 hdc shell 时看到的还是原来那个干净界面。
+
 .EXAMPLE
     .\bin\ohc-term.ps1
 
 .EXAMPLE
     .\bin\ohc-term.ps1 -NoBuffer
+
+.EXAMPLE
+    .\bin\ohc-term.ps1 -Quiet
 #>
 [CmdletBinding()]
 param(
     [string]$Hdc = "",
     [int]$BufferHeight = 9001,
     [switch]$NoBuffer,
-    [switch]$NoWatcher
+    [switch]$NoWatcher,
+    [switch]$DryRun,
+    [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
 
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
-function Write-Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
-function Write-Ok($m)   { Write-Host "    [OK] $m" -ForegroundColor Green }
-function Write-Warn2($m){ Write-Host "    [!]  $m" -ForegroundColor Yellow }
+function Write-Step($m) { if (-not $Quiet) { Write-Host "==> $m" -ForegroundColor Cyan } }
+function Write-Ok($m)   { if (-not $Quiet) { Write-Host "    [OK] $m" -ForegroundColor Green } }
+function Write-Warn2($m){ if (-not $Quiet) { Write-Host "    [!]  $m" -ForegroundColor Yellow } }
 function Fail($m)       { Write-Host "[失败] $m" -ForegroundColor Red; exit 1 }
 
 # ------------------------------------------------------------------ 1. hdc
@@ -186,11 +198,26 @@ if (-not $NoWatcher) {
 }
 
 # ------------------------------------------------------------------ 5. 交互会话
-Write-Host ""
-Write-Host "  进去后直接敲 claude 或 opencode" -ForegroundColor Gray
-Write-Host "  手动再同步一次尺寸：  /data/ohc/bin/ohc-tty" -ForegroundColor Gray
-Write-Host "  退出会话（exit 或 Ctrl+D）后，尺寸跟随自动停止" -ForegroundColor Gray
-Write-Host ""
+if ($DryRun) {
+    Start-Sleep -Milliseconds 900
+    Write-Step "DryRun 校验"
+    $got = (& $Hdc shell "cat /data/ohc/run/tty 2>/dev/null" 2>&1) -join ''
+    Write-Ok ("设备侧 /data/ohc/run/tty = " + $got.Trim())
+    $sz = (& $Hdc shell "busybox stty -F /dev/pts/0 size 2>/dev/null; echo -" 2>&1) -join ' '
+    Write-Ok ("本机窗口 = " + [Console]::WindowWidth + "x" + [Console]::WindowHeight + "（列x行）")
+    if ($watcher) { try { $watcher.Stop() } catch { }; try { $watcher.Dispose() } catch { } }
+    Write-Host ""
+    Write-Host "  DryRun 结束，没有进入交互会话" -ForegroundColor Gray
+    return
+}
+
+if (-not $Quiet) {
+    Write-Host ""
+    Write-Host "  进去后直接敲 claude 或 opencode" -ForegroundColor Gray
+    Write-Host "  手动再同步一次尺寸：  /data/ohc/bin/ohc-tty" -ForegroundColor Gray
+    Write-Host "  退出会话（exit 或 Ctrl+D）后，尺寸跟随自动停止" -ForegroundColor Gray
+    Write-Host ""
+}
 
 try {
     & $Hdc shell
