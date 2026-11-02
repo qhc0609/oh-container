@@ -1,0 +1,279 @@
+#!/bin/sh
+# =============================================================================
+#  ohc - OpenHarmony Container runtime
+#  一个从零写的极简容器运行时，不依赖 docker / runc / lxc / podman
+#
+#  隔离手段（受 OpenHarmony 4.0 内核能力约束）：
+#    - mount namespace   : 容器内挂载点与宿主互不可见
+#    - uts   namespace   : 容器有独立 hostname
+#    - ipc   namespace   : 容器有独立 SysV IPC / 共享内存
+#    - chroot            : 根目录切换，容器只见自己的 rootfs
+#
+#  不可用（内核未开启，不是配置问题）：
+#    - PID namespace     : /proc/self/ns 无 pid，unshare -p 返回 EINVAL
+#    - user  namespace   : 同上
+#  因此容器不是 PID 1，进程列表与宿主共享，不能做 pid 级隔离与 init 回收。
+# =============================================================================
+
+OHC_VERSION="0.1.0"
+OHC_ROOT="${OHC_ROOT:-/data/ohc}"
+OHC_SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+
+log()  { [ "${OHC_QUIET:-0}" = "1" ] || echo "[ohc] $*" >&2; }
+die()  { echo "[ohc] 错误: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# OpenHarmony 的 toybox 没有 awk，grep 读管道也会报错，统一退回 busybox
+_awk()  { if have awk;  then awk "$@";  else busybox awk "$@";  fi; }
+_grep() { if have grep; then busybox grep "$@"; else grep "$@"; fi; }
+
+# ---------------------------------------------------------------- 网络自检
+# OpenHarmony 的 wlan0 经常只有链路路由、没有默认路由，导致容器内出不去。
+# 这里做一次幂等修复：缺默认路由就补一条。
+ensure_net() {
+    [ "${OHC_NO_NETSETUP:-0}" = "1" ] && return 0
+    if netstat -rn 2>/dev/null | _grep -q '^0\.0\.0\.0'; then
+        return 0
+    fi
+    _gw="${OHC_GATEWAY:-192.168.76.15}"
+    _if="${OHC_IFACE:-wlan0}"
+    log "未发现默认路由，尝试补一条: default via $_gw dev $_if"
+    route add default gw "$_gw" dev "$_if" 2>/dev/null \
+        && log "默认路由已添加" \
+        || log "警告: 默认路由添加失败，容器内可能无法访问外网"
+}
+
+# ---------------------------------------------------------------- create
+cmd_create() {
+    _name="$1"; shift
+    _from=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from) _from="$2"; shift 2 ;;
+            *) die "未知参数: $1" ;;
+        esac
+    done
+    [ -n "$_name" ] || die "用法: ohc create <name> [--from <rootfs_dir>]"
+
+    _dst="$OHC_ROOT/rootfs/$_name"
+    [ -e "$_dst" ] && die "容器已存在: $_name"
+
+    mkdir -p "$OHC_ROOT/rootfs" "$OHC_ROOT/containers/$_name"
+    if [ -n "$_from" ]; then
+        [ -d "$_from" ] || die "源 rootfs 不存在: $_from"
+        log "从 $_from 复制 rootfs -> $_dst"
+        mkdir -p "$_dst"
+        # 只复制真实目录内容；proc/sys/dev 由运行时动态挂载，跳过
+        for _d in "$_from"/*; do
+            [ -e "$_d" ] || continue
+            case "$(basename "$_d")" in
+                proc|sys|dev) continue ;;
+            esac
+            cp -a "$_d" "$_dst/" 2>/dev/null || log "跳过: $_d"
+        done
+    else
+        mkdir -p "$_dst"/{bin,etc,proc,sys,dev,tmp,root,usr,var}
+    fi
+
+    # 容器基础文件
+    mkdir -p "$_dst/proc" "$_dst/sys" "$_dst/dev/pts" "$_dst/dev/shm" \
+             "$_dst/tmp" "$_dst/root" "$_dst/run" "$_dst/etc"
+    printf 'nameserver 223.5.5.5\nnameserver 114.114.114.114\n' > "$_dst/etc/resolv.conf"
+    printf '127.0.0.1\tlocalhost\n::1\t\tlocalhost\n' > "$_dst/etc/hosts"
+
+    # 容器环境变量文件（默认空）
+    _envf="$OHC_ROOT/containers/$_name/env"
+    [ -f "$_envf" ] || : > "$_envf"
+    chmod 600 "$_envf"
+
+    log "容器已创建: $_name  ->  $_dst"
+}
+
+# ---------------------------------------------------------------- inner
+# 在 namespace 内部执行：挂载文件系统 -> 切根 -> 执行命令
+cmd_inner() {
+    _name="$1"; shift
+    _rootfs="$OHC_ROOT/rootfs/$_name"
+    [ -d "$_rootfs" ] || die "rootfs 不存在: $_rootfs"
+
+    # 1. hostname（已在新 uts ns 中，改不到宿主）
+    hostname "$_name" 2>/dev/null || log "警告: 设置 hostname 失败"
+
+    # 2. 把整个挂载树设为私有，防止容器内挂载传播回宿主
+    mount --make-rprivate / 2>/dev/null || \
+        mount -o remount,private / 2>/dev/null || true
+
+    # 3. 挂载容器内文件系统
+    for _d in proc sys dev tmp run; do mkdir -p "$_rootfs/$_d"; done
+    mkdir -p "$_rootfs/dev/pts" "$_rootfs/dev/shm"
+
+    mount -t proc proc "$_rootfs/proc" 2>/dev/null \
+        || log "警告: 挂载 /proc 失败"
+    mount --bind /sys "$_rootfs/sys" 2>/dev/null \
+        || mount -t sysfs sysfs "$_rootfs/sys" 2>/dev/null \
+        || log "警告: 挂载 /sys 失败"
+    # /dev 用 rbind 带上宿主的 pts，保证容器内有可用 tty（claude 需要）
+    mount --rbind /dev "$_rootfs/dev" 2>/dev/null \
+        || mount --bind /dev "$_rootfs/dev" 2>/dev/null \
+        || log "警告: 挂载 /dev 失败"
+    mount -t tmpfs tmpfs "$_rootfs/tmp" 2>/dev/null \
+        || log "警告: 挂载 /tmp 失败"
+
+    # 宿主工作目录 /data/ohc/workspace -> 容器内 /work
+    # 放在 /data 下，重启不丢；claude 在这里改的文件在宿主上也能看到
+    _work="$OHC_ROOT/workspace"
+    _wd="/"
+    if [ -d "$_work" ]; then
+        mkdir -p "$_rootfs/work"
+        if mount --bind "$_work" "$_rootfs/work" 2>/dev/null; then
+            _wd="/work"
+        else
+            log "警告: 挂载 workspace 失败"
+        fi
+    fi
+    _wd="${OHC_WORKDIR:-$_wd}"
+
+    # 4. DNS / hosts
+    if [ -d "$_rootfs/etc" ]; then
+        printf 'nameserver 223.5.5.5\nnameserver 114.114.114.114\n' \
+            > "$_rootfs/etc/resolv.conf" 2>/dev/null || true
+        [ -f "$_rootfs/etc/hosts" ] || \
+            printf '127.0.0.1\tlocalhost\n' > "$_rootfs/etc/hosts" 2>/dev/null || true
+    fi
+
+    # 5. 加载容器环境变量
+    # 注意必须 set -a：直接 source 只会产生 shell 局部变量，
+    # 不会传给后面 exec 出去的 claude，表现为 "Not logged in"。
+    _envf="$OHC_ROOT/containers/$_name/env"
+    if [ -f "$_envf" ]; then
+        set -a
+        # shellcheck disable=SC1090
+        . "$_envf"
+        set +a
+    fi
+
+    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    # 必须强制指定 HOME：hdc shell 的环境里 HOME=/，会一路传进容器，
+    # 导致 claude 把 ~/.claude.json 写到根目录（/.claude.json）。
+    export HOME="${OHC_HOME:-/root}"
+    export TERM="${TERM:-xterm-256color}"
+    export LANG="${LANG:-C.UTF-8}"
+
+    # 6. 切根并执行（$_wd 作为第一个参数传进去，避免引号拼接出错）
+    if [ $# -eq 0 ]; then
+        set -- /bin/sh
+    fi
+    log "进入容器 $_name (hostname=$_name, cwd=$_wd, rootfs=$_rootfs)"
+    exec chroot "$_rootfs" /bin/sh -c 'cd "$1" 2>/dev/null || cd /; shift; exec "$@"' \
+        ohc "$_wd" "$@"
+}
+
+# ---------------------------------------------------------------- run
+cmd_run() {
+    _name="$1"; shift
+    [ -n "$_name" ] || die "用法: ohc run <name> [--] [cmd...]"
+    _rootfs="$OHC_ROOT/rootfs/$_name"
+    [ -d "$_rootfs" ] || die "容器不存在: $_name"
+    [ "$1" = "--" ] && shift
+
+    ensure_net
+
+    # 不带 -f：unshare 直接 exec 目标命令，保持当前进程的 stdin/stdout，
+    # 这样交互式 TTY 不会被切断（claude 必须有 tty）。
+    exec unshare -m -u -i "$OHC_SELF" __inner "$_name" "$@"
+}
+
+# ---------------------------------------------------------------- 其它
+cmd_shell() { cmd_run "$1" -- /bin/sh; }
+
+cmd_ls() {
+    printf '%-16s %-12s %-10s %s\n' "NAME" "SIZE" "HOSTNAME" "ROOTFS"
+    for _c in "$OHC_ROOT"/rootfs/*; do
+        [ -d "$_c" ] || continue
+        _n="$(basename "$_c")"
+        _sz="$(du -sh "$_c" 2>/dev/null | _awk '{print $1}')"
+        printf '%-16s %-12s %-10s %s\n' "$_n" "${_sz:-?}" "$_n" "$_c"
+    done
+}
+
+cmd_info() {
+    _name="$1"
+    _rootfs="$OHC_ROOT/rootfs/$_name"
+    [ -d "$_rootfs" ] || die "容器不存在: $_name"
+    echo "名称      : $_name"
+    echo "rootfs    : $_rootfs"
+    echo "大小      : $(du -sh "$_rootfs" 2>/dev/null | _awk '{print $1}')"
+    echo "环境变量  : $OHC_ROOT/containers/$_name/env"
+    echo "--- env ---"
+    sed 's/\(TOKEN=\).*/\1***已隐藏***/; s/\(KEY=\).*/\1***已隐藏***/' \
+        "$OHC_ROOT/containers/$_name/env" 2>/dev/null
+}
+
+cmd_rm() {
+    _name="$1"
+    [ -n "$_name" ] || die "用法: ohc rm <name>"
+    _rootfs="$OHC_ROOT/rootfs/$_name"
+    [ -d "$_rootfs" ] || die "容器不存在: $_name"
+    log "删除 $_rootfs"
+    rm -rf "$_rootfs" "$OHC_ROOT/containers/$_name"
+    log "已删除"
+}
+
+cmd_net() {
+    echo "--- 路由 ---"; netstat -rn 2>/dev/null | head -6
+    echo "--- wlan0 ---"; ifconfig wlan0 2>/dev/null | head -3
+    ensure_net
+}
+
+cmd_doctor() {
+    echo "ohc version : $OHC_VERSION"
+    echo "ohc root    : $OHC_ROOT"
+    echo "uname       : $(uname -m) $(uname -r)"
+    echo "SELinux     : $(cat /sys/fs/selinux/enforce 2>/dev/null)"
+    echo "uid         : $(id -u)"
+    echo
+    echo "namespace 支持:"
+    for _ns in mnt uts ipc net pid user; do
+        if [ -e "/proc/self/ns/$_ns" ]; then
+            echo "  $_ns : 可用"
+        else
+            echo "  $_ns : 不可用（内核未开启）"
+        fi
+    done
+    echo
+    echo "默认路由    : $(netstat -rn 2>/dev/null | _grep '^0\.0\.0\.0' || echo '缺失')"
+}
+
+usage() {
+    cat <<EOF
+ohc $OHC_VERSION - OpenHarmony 极简容器运行时
+
+用法:
+  ohc create <name> [--from <rootfs_dir>]   创建容器
+  ohc run <name> [--] [cmd...]             启动容器并执行命令（默认 /bin/sh）
+  ohc shell <name>                         启动容器交互 shell
+  ohc ls                                   列出容器
+  ohc info <name>                          查看容器信息与环境变量
+  ohc net                                  查看/修复网络
+  ohc doctor                               自检运行环境
+  ohc rm <name>                            删除容器
+
+示例:
+  ohc create claude --from /data/alpine
+  ohc run claude -- claude
+EOF
+}
+
+case "$1" in
+    create)  shift; cmd_create  "$@" ;;
+    run)     shift; cmd_run     "$@" ;;
+    shell)   shift; cmd_shell   "$@" ;;
+    ls|list) cmd_ls ;;
+    info)    shift; cmd_info    "$@" ;;
+    net)     cmd_net ;;
+    doctor)  cmd_doctor ;;
+    rm)      shift; cmd_rm      "$@" ;;
+    __inner) shift; cmd_inner   "$@" ;;
+    ""|-h|--help|help) usage ;;
+    *) die "未知子命令: $1（ohc --help 查看用法）" ;;
+esac

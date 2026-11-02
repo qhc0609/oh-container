@@ -1,0 +1,11 @@
+#!/bin/sh
+echo "--- 容器内环境变量 ---"
+echo "BASE_URL  = ${ANTHROPIC_BASE_URL:-<未设置>}"
+echo "MODEL     = ${ANTHROPIC_MODEL:-<未设置>}"
+echo "TOKEN     = $(echo "${ANTHROPIC_AUTH_TOKEN:-<未设置>}" | cut -c1-8)****"
+echo "RIPGREP   = ${USE_BUILTIN_RIPGREP:-<未设置>}"
+echo "--- 依赖检查 ---"
+echo "node      = $(node -v 2>&1)"
+echo "rg        = $(rg --version 2>&1 | head -1)"
+echo "bash      = $(bash --version 2>&1 | head -1)"
+echo "claude    = $(claude --version 2>&1)"

@@ -1,0 +1,25 @@
+#!/bin/sh
+# ============================================================
+#  oc-setkey —— 写入 OpenCode API Key（走 OpenCode Zen 免费模型用）
+#  用法: oc-setkey <OpenCode API Key>
+#
+#  注意：这不是 DeepSeek 的 key，是 opencode.ai/console 里生成的那个。
+# ============================================================
+
+D=/data/ohc/rootfs/claude/root/.local/share/opencode
+F=$D/auth.json
+
+KEY="$1"
+if [ -z "$KEY" ]; then
+    echo "用法: oc-setkey <OpenCode API Key>" >&2
+    echo "  在 https://opencode.ai/console 注册后获取" >&2
+    exit 1
+fi
+
+mkdir -p "$D"
+printf '{"opencode":{"type":"api","key":"%s"}}\n' "$KEY" > "$F"
+chmod 600 "$F"
+
+echo "已写入 $F"
+echo "当前认证："
+busybox sed 's/\("key":"\).*"/\1***已隐藏***"/' "$F"

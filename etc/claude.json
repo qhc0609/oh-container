@@ -1,0 +1,19 @@
+{
+  "hasCompletedOnboarding": true,
+  "theme": "dark",
+  "numStartups": 2,
+  "installMethod": "npm",
+  "autoUpdates": false,
+  "projects": {
+    "/": {
+      "hasTrustDialogAccepted": true,
+      "allowedTools": [],
+      "hasCompletedProjectOnboarding": true
+    },
+    "/root": {
+      "hasTrustDialogAccepted": true,
+      "allowedTools": [],
+      "hasCompletedProjectOnboarding": true
+    }
+  }
+}

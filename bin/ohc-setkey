@@ -1,0 +1,31 @@
+#!/bin/sh
+# ============================================================
+#  ohc-setkey —— 安全写入 DeepSeek API Key
+#  用法: ohc-setkey sk-xxxxxxxxxxxxxxxx
+#  只改 ANTHROPIC_AUTH_TOKEN 一行，文件权限保持 600
+# ============================================================
+
+ENVF=/data/ohc/containers/claude/env
+
+KEY="$1"
+if [ -z "$KEY" ]; then
+    echo "用法: ohc-setkey <你的 DeepSeek API Key>" >&2
+    echo "例如: ohc-setkey sk-1234567890abcdef" >&2
+    exit 1
+fi
+
+case "$KEY" in
+    sk-*) : ;;
+    *) echo "提示: DeepSeek 的 key 一般以 sk- 开头，确认一下没粘错" >&2 ;;
+esac
+
+[ -f "$ENVF" ] || { echo "错误: 找不到 $ENVF" >&2; exit 1; }
+
+# 删掉旧的 token 行（含占位符），再追加新的
+busybox sed -i '/^ANTHROPIC_AUTH_TOKEN=/d' "$ENVF"
+printf 'ANTHROPIC_AUTH_TOKEN=%s\n' "$KEY" >> "$ENVF"
+chmod 600 "$ENVF"
+
+echo "已写入 $ENVF"
+echo "当前 ANTHROPIC 配置："
+busybox sed 's/\(ANTHROPIC_AUTH_TOKEN=\).*/\1***已隐藏***/' "$ENVF" | busybox grep '^ANTHROPIC'

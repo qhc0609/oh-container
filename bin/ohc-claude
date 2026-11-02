@@ -1,0 +1,42 @@
+#!/bin/sh
+# ============================================================
+#  ohc-claude —— 一键进入容器并启动 claude（DeepSeek 后端）
+#
+#  用法:
+#    ohc-claude                 进入交互式 claude
+#    ohc-claude -p "你好"       单次提问（非交互）
+#    ohc-claude --version       看版本
+# ============================================================
+
+OHC=/data/ohc/bin/ohc
+ENVF=/data/ohc/containers/claude/env
+
+if [ ! -f "$ENVF" ]; then
+    echo "[ohc-claude] 找不到配置: $ENVF" >&2
+    exit 1
+fi
+
+# 检查 key 是否还是占位符
+if busybox grep -q 'sk-REPLACE_ME' "$ENVF" 2>/dev/null; then
+    cat >&2 <<'EOF'
+[ohc-claude] 还没填 DeepSeek API Key。
+
+请执行（把 sk-xxxx 换成你自己的 key）：
+  echo 'ANTHROPIC_AUTH_TOKEN=sk-xxxx' >> /data/ohc/containers/claude/env
+  # 然后删掉旧的占位行
+  busybox sed -i '/sk-REPLACE_ME/d' /data/ohc/containers/claude/env
+
+或者直接编辑该文件：
+  vi /data/ohc/containers/claude/env
+EOF
+    exit 2
+fi
+
+# -p / --print 模式下 claude 会等 stdin 3 秒，这里直接给 /dev/null 跳过等待
+case " $* " in
+    *" -p "*|*" --print "*)
+        exec "$OHC" run claude -- claude "$@" < /dev/null
+        ;;
+esac
+
+exec "$OHC" run claude -- claude "$@"

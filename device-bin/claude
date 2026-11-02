@@ -1,0 +1,14 @@
+#!/bin/sh
+# ============================================================
+#  设备上的 claude 入口
+#  安装位置: /data/python/lib/python3.8/script/bin/claude
+#  （该目录在 OpenHarmony 默认 PATH 中，且在 /data 下可写）
+#
+#  效果: hdc shell 进去后，在任意目录（包括 /）敲 claude 即可
+#        启动容器内的 claude，后端走 DeepSeek。
+# ============================================================
+
+# 不打印 "[ohc] 进入容器 ..." 这类日志，让 claude 的输出干净
+export OHC_QUIET=1
+
+exec /data/ohc/bin/ohc-claude "$@"

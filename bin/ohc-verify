@@ -1,0 +1,33 @@
+#!/bin/sh
+# ============================================================
+#  ohc-verify —— 端到端验证：容器 -> DeepSeek -> claude
+# ============================================================
+
+OHC=/data/ohc/bin/ohc
+ENVF=/data/ohc/containers/claude/env
+
+echo "===== 1. 配置检查 ====="
+if busybox grep -q 'sk-REPLACE_ME' "$ENVF" 2>/dev/null; then
+    echo "  失败: key 还是占位符，先执行 ohc-setkey sk-xxxx"
+    exit 1
+fi
+echo "  key 已设置: $(busybox grep '^ANTHROPIC_AUTH_TOKEN=' "$ENVF" | cut -c1-26)****"
+
+echo "===== 2. 容器内依赖 ====="
+$OHC run claude -- /bin/sh -c 'echo "  node=$(node -v) claude=$(claude --version 2>&1)"'
+
+echo "===== 3. 直连 DeepSeek /anthropic/v1/messages ====="
+$OHC run claude -- /bin/sh -c '
+curl -s -o /tmp/r.txt -w "  HTTP=%{http_code}\n" \
+  -X POST "$ANTHROPIC_BASE_URL/v1/messages" \
+  -H "x-api-key: $ANTHROPIC_AUTH_TOKEN" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d "{\"model\":\"$ANTHROPIC_MODEL\",\"max_tokens\":32,\"messages\":[{\"role\":\"user\",\"content\":\"reply with exactly: OHC_OK\"}]}"
+head -c 400 /tmp/r.txt; echo
+'
+
+echo "===== 4. claude 非交互调用 ====="
+$OHC run claude -- /bin/sh -c 'echo "1+1等于几？只回答数字" | claude -p 2>&1 | head -10'
+
+echo "===== 验证结束 ====="

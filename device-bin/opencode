@@ -1,0 +1,23 @@
+#!/bin/sh
+# ============================================================
+#  设备上的 opencode 入口
+#  安装位置: /data/python/lib/python3.8/script/bin/opencode
+#  （该目录在 OpenHarmony 默认 PATH 中，且在 /data 下可写）
+#
+#  默认走 OpenCode Zen 的免费模型:
+#      opencode/deepseek-v4.1-flash-free
+#
+#  用法:
+#    opencode                                          交互式 TUI
+#    opencode run "问题"                                单次提问
+#    opencode run -m opencode/deepseek-v4-pro "问题"    临时换模型
+# ============================================================
+
+export OHC_QUIET=1
+
+# opencode run 在非交互环境下会一直等 stdin，这里直接给 /dev/null
+if [ "$1" = "run" ]; then
+    exec /data/ohc/bin/ohc run claude -- opencode "$@" < /dev/null
+fi
+
+exec /data/ohc/bin/ohc run claude -- opencode "$@"

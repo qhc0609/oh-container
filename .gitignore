@@ -1,0 +1,29 @@
+# 备份包太大（834MB），走 GitHub Release，不进仓库
+backup/ohc-backup.tar.gz
+backup/*.tar.gz
+backup/*.tar
+backup/*.enc
+backup/*.zip
+
+# 校验文件跟着备份包一起走，仓库里不留
+backup/SHA256SUMS.txt
+
+# 任何真实 key 都不许进仓库
+*.env
+!etc/claude.env
+**/auth.json
+.env
+.env.*
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+*.tmp
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
