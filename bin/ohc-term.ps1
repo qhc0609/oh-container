@@ -45,6 +45,7 @@
 param(
     [string]$Hdc = "",
     [switch]$NoWatcher,
+    [switch]$NoBigBuffer,
     [switch]$DryRun,
     [switch]$Quiet
 )
@@ -53,6 +54,7 @@ $ErrorActionPreference = 'Stop'
 
 # 想彻底关掉后台跟随（怀疑它影响稳定性时）：$env:OHC_NO_WATCHER = "1"
 if ($env:OHC_NO_WATCHER -eq '1') { $NoWatcher = $true }
+if ($env:OHC_NO_BIGBUFFER -eq '1') { $NoBigBuffer = $true }
 
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
@@ -143,24 +145,29 @@ if (-not $NoWatcher) {
         $r = $lastR
         $c = $lastC
         $fail = 0
-        $dirtyAt = 0          # 最后一次发现尺寸变化的时刻；0 表示没有待推送的尺寸
-        $stableMs = 500       # 连续 500ms 不再变化才推
+        $pending = $false
+        $urgent = $false        # 缩小时要立刻推
+        $dirtyAt = 0
+        $stableMs = 400         # 放大时等窗口停稳再推
         while ($true) {
             try {
                 # 只读控制台，绝不写（写缓冲区会让 conhost 直接 fail-fast）
                 $nr = [Console]::WindowHeight
                 $nc = [Console]::WindowWidth
                 if ($nr -ne $r -or $nc -ne $c) {
+                    # 变小 = 危险方向：claude 还在按旧尺寸画，hdc 就可能写到缓冲区外面，
+                    # 把 conhost 打崩（0xc0000409）。所以缩小时立刻推，让 claude 马上重画。
+                    # 变大是安全方向，等窗口停稳再推，免得拖动过程中疯狂重画。
+                    $urgent = ($nc -lt $c) -or ($nr -lt $r)
                     $r = $nr
                     $c = $nc
+                    $pending = $true
                     $dirtyAt = [Environment]::TickCount
                 }
-                # 关键：拖动窗口的过程中一次都不推。
-                # 每推一次尺寸，设备侧就 SIGWINCH -> claude 整屏重画，
-                # 一大串转义序列正好灌在 conhost 正在缩放的当口，很容易把它打崩
-                # （实测 conhost.exe 0xc0000409 / BEX64）。停稳 500ms 只重画一次。
-                if ($dirtyAt -ne 0 -and ([Environment]::TickCount - $dirtyAt) -ge $stableMs) {
-                    $dirtyAt = 0
+                $due = $pending -and ($urgent -or (([Environment]::TickCount - $dirtyAt) -ge $stableMs))
+                if ($due) {
+                    $pending = $false
+                    $urgent = $false
                     if ($r -ge 10 -and $c -ge 40) {
                         [System.IO.File]::WriteAllText($sizeFile, "$r $c`n", [System.Text.Encoding]::ASCII)
                         $pi = New-Object System.Diagnostics.ProcessStartInfo
@@ -188,7 +195,7 @@ if (-not $NoWatcher) {
         }
     }).AddArgument($Hdc).AddArgument($sizeFile).AddArgument($initR).AddArgument($initC)
     $null = $watcher.BeginInvoke()
-    Write-Ok "窗口尺寸跟随已开启（窗口停稳约 0.5 秒后才重画一次）"
+    Write-Ok "窗口尺寸跟随已开启（缩小时立刻生效，放大时等窗口停稳）"
 }
 
 # ------------------------------------------------------------------ 4. 交互会话
@@ -212,6 +219,35 @@ if (-not $Quiet) {
     Write-Host "  提示：先把窗口拉到合适大小再进来。hdc 自己处理缩放有 bug，" -ForegroundColor DarkGray
     Write-Host "        会话进行中反复缩放可能让整个窗口崩掉（conhost 0xc0000409）" -ForegroundColor DarkGray
     Write-Host ""
+}
+
+# ------------------------------------------------------------------ 5. 放大控制台缓冲区
+#
+# 崩溃机理（有事件日志和崩溃转储撑腰）：
+#   hdc 用**绝对坐标**往控制台写（SetConsoleCursorPosition），而且从不调
+#   SetConsoleScreenBufferSize / SetConsoleWindowInfo 去跟着窗口调整。
+#   窗口被拖小以后，它仍按原来的坐标写 -> 越界 -> conhost 直接 fail-fast
+#   （Application Error 1000：conhost.exe 0xc0000409，WER 事件 BEX64）。
+#   裸 hdc shell 不崩，是因为它缩放时没东西可写；claude 一直在重画，所以必崩。
+#
+# 对策：进会话之前把缓冲区一次性放大到「不小于窗口、且留足余量」。
+# 只要缓冲区不缩回窗口大小，hdc 那些旧坐标就仍然落在合法范围内。
+# 必须保证 buffer 宽 >= 窗口宽、buffer 高 >= 窗口高，否则就是非法状态
+# —— 之前把 conhost 写崩过，就是栽在这一条上（宽 80 < 窗口宽 120）。
+if (-not $NoBigBuffer) {
+    try {
+        $w = [Console]::WindowWidth
+        $h = [Console]::WindowHeight
+        $tw = [Math]::Max($w, 120)
+        $th = [Math]::Max($h, 600)
+        if ([Console]::BufferWidth -lt $tw -or [Console]::BufferHeight -lt $th) {
+            [Console]::SetBufferSize([Math]::Max($tw, [Console]::BufferWidth),
+                                     [Math]::Max($th, [Console]::BufferHeight))
+            Write-Ok ("控制台缓冲区 -> " + [Console]::BufferWidth + "x" + [Console]::BufferHeight + "（窗口 " + $w + "x" + $h + "）")
+        }
+    } catch {
+        Write-Warn2 ("放大控制台缓冲区失败（不影响使用）：" + $_.Exception.Message)
+    }
 }
 
 try {

@@ -68,10 +68,18 @@ if [ -f "$TTYF" ]; then
 fi
 
 # 后台跟随窗口变化；pty 设备消失就退出
+#
+# 轮询间隔 0.2 秒（原来 1 秒）。这个延迟直接决定「危险窗口」的长度：
+# 窗口缩小后，claude 要等这次 stty 生效才收到 SIGWINCH 去重画；
+# 在这之前它仍按旧宽度画，hdc 就可能往控制台缓冲区外面写，把 conhost 打崩
+# （conhost.exe 0xc0000409）。所以这里越快越好。
+# sleep 用小数需要 busybox 支持，不支持就退回 1 秒。
 if [ -n "$TTYPATH" ] && [ -f "$TTYF" ]; then
     (
         trap '' HUP
         _last=""
+        _step=0.2
+        busybox sleep 0.2 2>/dev/null || _step=1
         while [ -c "$TTYPATH" ]; do
             _s=$(cat "$TTYF" 2>/dev/null)
             if [ -n "$_s" ] && [ "$_s" != "$_last" ]; then
@@ -81,7 +89,7 @@ if [ -n "$TTYPATH" ] && [ -f "$TTYF" ]; then
                 case "${2:-}" in ''|*[!0-9]*) continue ;; esac
                 busybox stty -F "$TTYPATH" rows "$1" cols "$2" 2>/dev/null
             fi
-            sleep 1
+            sleep "$_step"
         done
     ) >/dev/null 2>&1 &
 fi
