@@ -22,6 +22,7 @@ oh-container/
 │   ├── ohc-tty              把宿主机窗口尺寸同步到设备 pty（含后台跟随）
 │   ├── oc-setkey            写入 OpenCode Key
 │   ├── ohc-term.ps1         PC 侧启动器：读宿主机窗口尺寸 + 控制台缓冲区（翻页）
+│   ├── ohc-gateway.ps1      PC 侧网关启动器：让 VS Code 用上这套 DeepSeek
 │   └── ohc-profile.ps1      一次性安装 hdc 包装层，让 hdc shell 自动带尺寸
 ├── device-bin/              放到设备 PATH 里的入口脚本
 │   ├── claude
@@ -30,6 +31,7 @@ oh-container/
 │   ├── claude.env           DeepSeek 端点 / 模型 / 超时等
 │   ├── claude.json          .claude.json 种子（跳过引导、信任目录）
 │   ├── opencode.json        默认模型（免费 DeepSeek）
+│   ├── ohc-gw.mjs           OpenAI 兼容网关（容器内跑，给 PC 的 VS Code 用）
 │   ├── ohc-tmux             容器内滚屏启动器（部署到 /usr/local/bin）
 │   └── tmux.conf            tmux 配置：5 万行历史 + PageUp 直接翻页
 ├── backup/                  备份与一键恢复
@@ -540,3 +542,156 @@ opencode/deepseek-v4-pro             # 付费
 ```
 
 `opencode models` 可随时查看完整列表。
+
+---
+
+## 11. 让 PC 上的 VS Code 用这套 DeepSeek
+
+先分清一件事：**DeepSeek 不在手机里，在云上**。手机里装的是 claude 这个壳子，
+它拿着你的 Key 去连 `api.deepseek.com`。所以「VS Code 用手机里的模型」这件事，
+本质是「VS Code 怎么才能连上 `api.deepseek.com`」。
+
+### 情况 A：PC 能上网（90% 的人）
+
+别绕手机，直接连。VS Code 装 Continue / Cline / Roo Code，选 `OpenAI`（或
+`OpenAI Compatible`）provider，填：
+
+| 项 | 值 |
+|---|---|
+| Base URL | `https://api.deepseek.com/v1` |
+| API Key | 你自己的 `sk-...` |
+| Model | `deepseek-flash`（或 `deepseek-v4-pro`） |
+
+手机、容器、hdc 全都不用管。
+
+### 情况 B：PC 不能上网，只有手机能上网（本项目的真实场景）
+
+这就是第 01 篇文章里那个场景：内网机器、涉密机器、临时工位，PC 连不上外网，
+但 USB 口是通的、手机有流量。那就让手机当**中转站**：
+
+```
+VS Code ──http──▶ 127.0.0.1:18080 ──hdc fport(USB)──▶ 容器内 ohc-gw ──https──▶ api.deepseek.com
+```
+
+PC 上没有任何一包外网流量，走的是 USB 上的 hdc 端口转发。防火墙、代理、白名单全绕开。
+
+#### 起网关
+
+```powershell
+cd <仓库目录>
+powershell -ExecutionPolicy Bypass -File .\bin\ohc-gateway.ps1
+```
+
+它干四件事：把 `etc/ohc-gw.mjs` 推进容器 → 在容器里 `nohup node` 起来 →
+`hdc fport tcp:18080 tcp:18080` → 自己打一遍 healthz 和一次真实对话验证。
+
+成功的样子：
+
+```
+==> 建立端口映射（USB 转发）
+    Forwardport result:OK
+    [OK] 127.0.0.1:18080 -> 设备 18080
+==> 验证通道
+    [OK] healthz: ohc-gw ok
+    [OK] 真实对话: 收到
+```
+
+#### VS Code 里填
+
+| 项 | 值 |
+|---|---|
+| Provider | `OpenAI` / `OpenAI Compatible` |
+| Base URL | `http://127.0.0.1:18080/v1` |
+| API Key | `sk-any-nonempty`（**随便填个非空串**，网关会换成真 Key） |
+| Model | `deepseek-flash` 或 `deepseek-v4-pro` |
+
+Continue 的 `config.json`：
+
+```json
+{
+  "models": [{
+    "title": "DeepSeek (via phone)",
+    "provider": "openai",
+    "model": "deepseek-flash",
+    "apiBase": "http://127.0.0.1:18080/v1",
+    "apiKey": "sk-any-nonempty",
+    "completionOptions": { "maxTokens": 4096 }
+  }]
+}
+```
+
+Cline / Roo Code：Provider 选 `OpenAI Compatible`，Base URL 填上面那个，
+勾上「支持流式」即可。
+
+#### 管它
+
+```powershell
+.\bin\ohc-gateway.ps1 -Status    # 看进程和端口映射还在不在
+.\bin\ohc-gateway.ps1 -Stop      # 用完关掉
+```
+
+拔 USB、手机重启，映射就没了，重跑一次启动命令即可。
+
+### 为什么中间要加一层网关
+
+理论上 `hdc fport` 直接转发到 `api.deepseek.com:443` 不行吗？不行，
+`fport` 只能转发到**设备上的端口**，不能替你做 TLS 和目标域名解析。
+所以容器里必须有个进程真的去发那个 HTTPS 请求，`ohc-gw.mjs` 就是它——
+一个 90 行的 Node 脚本，把 `/v1/*` 原样转给上游，顺手把 `Authorization` 换成
+容器 env 里的真 Key。
+
+顺带的好处：Key 只存在手机里（`/data/ohc/containers/claude/env`，600 权限），
+PC 的 VS Code 配置里那个 Key 是假的，配置文件被同事看到、被同步到云端都不怕。
+
+### 三个坑（都实测踩过）
+
+**1. `max_tokens` 给小了，模型「不回话」**
+
+`deepseek-flash` 是推理模型，思考过程也占 `max_tokens`。给 64 的结果：
+
+```
+max_tokens=64   content_len=0    completion=64      ← 全花在思考上，content 是空串
+max_tokens=800  content_len=144  completion=84      ← 正常
+```
+
+界面上的表现就是「有回复，但内容是空的」，很容易误判成网关坏了。
+所以 `ohc-gw.mjs` 里加了个下限：请求里的 `max_tokens` 小于 2048 就抬到 2048
+（可用环境变量 `OHC_GW_MIN_MAXTOKENS` 改）。修完之后：
+
+```
+max_tokens=64   content_len=144   completion=84     ← 抬到 2048 了
+```
+
+**2. `hdc fport rm` 也必须是两个独立参数**
+
+`fport` 要两个参数这事已经踩过一次，`rm` 竟然一样：
+
+```powershell
+hdc fport rm "tcp:18080 tcp:18080"    # [Fail] ruler is not exist  ← 静默失败，返回码还是 0
+hdc fport rm tcp:18080 tcp:18080      # Remove forward ruler success
+```
+
+拼成一个字符串时它**不删也不报错**（返回码 0）。后果是下一次 `fport` 建映射时
+报 `TCP Port listen failed at 18080`——端口被上一次的残留占着。
+你以为新映射建好了，其实一直在用旧的。排查了半天才发现是这行。
+
+**3. PowerShell 5.1 发中文会变成 `?`**
+
+```powershell
+Invoke-RestMethod -Body $jsonString -ContentType 'application/json'   # 中文变 '?'
+```
+
+PS 5.1 对没有 `charset` 的 content-type 按 ASCII 编码 body。要么显式加
+`; charset=utf-8` **并传字节数组**，要么就接受模型看不懂中文。
+`ohc-gateway.ps1` 里的自检已经改成传 `[System.Text.Encoding]::UTF8.GetBytes(...)`。
+
+### 实测记录
+
+```
+healthz                          -> ohc-gw ok
+/v1/models                       -> deepseek-flash, deepseek-v4-pro
+非流式 chat (max_tokens=800)     -> content=收到, completion=251
+流式 chat (stream=true)          -> 50 个 SSE chunk, 拼出 "1、2、3、4、5"
+max_tokens=64 自动抬升           -> content_len=144（修复前是 0）
+```
+

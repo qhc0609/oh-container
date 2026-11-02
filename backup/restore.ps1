@@ -214,6 +214,15 @@ if (Test-Path (Join-Path $repoRoot "bin\ohc-tty")) {
     }
 
     $null = Push-File (Join-Path $repoRoot "etc\tmux.conf") "/data/ohc/rootfs/claude/root" ".tmux.conf"
+
+    # 网关：给 PC 上 VS Code 用。PC 不能上网时，靠手机转一手去连 api.deepseek.com
+    $gw = Join-Path $repoRoot "etc\ohc-gw.mjs"
+    if (Test-Path $gw) {
+        $null = Push-File $gw "/data/ohc/rootfs/claude/usr/local/bin" "ohc-gw.mjs"
+        & $Hdc shell "chmod 644 /data/ohc/rootfs/claude/usr/local/bin/ohc-gw.mjs 2>/dev/null" | Out-Null
+        Write-Ok "网关 ohc-gw.mjs 已就位"
+    }
+
     Write-Ok "运行时已更新到仓库版本"
 } else {
     Write-Warn2 "没找到仓库目录，跳过运行时更新（只用备份包里的版本）"
@@ -278,6 +287,11 @@ Write-Host @"
   /data/ohc/bin/ohc net               # 修复默认路由（出不了网时用）
   /data/ohc/bin/ohc-setkey sk-xxx     # 换 DeepSeek Key
   /data/ohc/bin/oc-setkey oc_sk-xxx   # 换 OpenCode Key
+
+PC 上的 VS Code 想用这套 DeepSeek（PC 不能上网时）：
+  .\bin\ohc-gateway.ps1               # 起网关 + 建 USB 端口映射
+  VS Code 里填 Base URL: http://127.0.0.1:18080/v1
+  .\bin\ohc-gateway.ps1 -Stop         # 用完关掉
 
 说明：
   容器内工作目录是 /work，对应设备上的 /data/ohc/workspace

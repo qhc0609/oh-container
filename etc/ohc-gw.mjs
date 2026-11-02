@@ -1,0 +1,108 @@
+// ohc-gw.mjs —— 把 DeepSeek 包装成标准 OpenAI 兼容端点，供宿主机 VS Code 使用
+//
+// 为什么需要它：目标场景是「PC 不能上网」。PC 唯一能走的通道是 USB 上的 hdc，
+// 所以由手机（容器里）去连 api.deepseek.com，再把结果原样吐给 PC。
+//
+//   VS Code(Continue/Cline)  ──http──▶ 127.0.0.1:18080
+//                                          │  hdc fport（USB 转发）
+//                                          ▼
+//                                    容器内 ohc-gw   ──https──▶ api.deepseek.com
+//
+// 接口：把 /v1/* 原样转发到 https://api.deepseek.com/v1/*
+//       Authorization 由网关注入（Key 从容器 env 的 ANTHROPIC_AUTH_TOKEN 读，
+//       所以 VS Code 里 API Key 随便填一个非空字符串即可）
+// 流式：上游 SSE 直接 pipe 回来，不做缓冲，VS Code 里能逐字出
+
+import http from 'node:http';
+import https from 'node:https';
+
+const KEY = process.env.ANTHROPIC_AUTH_TOKEN || '';
+const PORT = Number(process.env.OHC_GW_PORT || 18080);
+const UPSTREAM = process.env.OHC_GW_UPSTREAM || 'https://api.deepseek.com';
+
+// deepseek-flash 是推理模型：思考过程也算在 max_tokens 里。
+// VS Code 插件常常把 max_tokens 设得很小（64/128），结果 token 全花在思考上，
+// 返回的 content 是空字符串，界面上表现为「模型不回话」。
+// 所以这里给一个下限，实测 64 时 content 为空、800 时正常。
+const MIN_MAXTOKENS = Number(process.env.OHC_GW_MIN_MAXTOKENS || 2048);
+
+if (!KEY.startsWith('sk-')) {
+    console.error('[ohc-gw] 没读到 ANTHROPIC_AUTH_TOKEN，检查 /data/ohc/containers/claude/env');
+    process.exit(1);
+}
+
+function json(res, code, obj) {
+    const s = JSON.stringify(obj);
+    res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(s) });
+    res.end(s);
+}
+
+const server = http.createServer((req, res) => {
+    // 健康检查：PC 侧用来确认通道通了
+    if (req.url === '/healthz') {
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end('ohc-gw ok');
+        return;
+    }
+
+    if (!req.url.startsWith('/v1/')) {
+        json(res, 404, { error: { message: 'only /v1/* is proxied' } });
+        return;
+    }
+
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+        let body = Buffer.concat(chunks);
+
+        // 把过小的 max_tokens 抬到下限，避免「思考完就没额度了、content 为空」
+        if (req.method === 'POST' && req.url.startsWith('/v1/chat/completions') && body.length) {
+            try {
+                const obj = JSON.parse(body.toString('utf8'));
+                if (typeof obj.max_tokens === 'number' && obj.max_tokens < MIN_MAXTOKENS) {
+                    obj.max_tokens = MIN_MAXTOKENS;
+                    body = Buffer.from(JSON.stringify(obj), 'utf8');
+                }
+            } catch { /* 不是合法 JSON 就原样转发 */ }
+        }
+
+        const u = new URL(UPSTREAM + req.url);
+
+        const headers = {
+            'content-type': req.headers['content-type'] || 'application/json',
+            'accept': req.headers['accept'] || 'application/json',
+            'authorization': 'Bearer ' + KEY,
+            'content-length': body.length
+        };
+
+        const up = https.request(
+            { hostname: u.hostname, port: 443, path: u.pathname + u.search, method: req.method, headers },
+            (ur) => {
+                res.writeHead(ur.statusCode || 502, {
+                    'content-type': ur.headers['content-type'] || 'application/json',
+                    'cache-control': 'no-cache',
+                    // 让中间层别攒着，SSE 才能逐字到
+                    'x-accel-buffering': 'no'
+                });
+                ur.pipe(res);
+            }
+        );
+
+        up.on('error', (e) => {
+            if (!res.headersSent) json(res, 502, { error: { message: 'upstream: ' + e.message } });
+            else res.end();
+        });
+
+        up.write(body);
+        up.end();
+    });
+});
+
+server.on('error', (e) => {
+    console.error('[ohc-gw] ' + e.message);
+    process.exit(1);
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+    console.log('[ohc-gw] listening on 0.0.0.0:' + PORT + ' -> ' + UPSTREAM);
+});
