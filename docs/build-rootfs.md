@@ -28,14 +28,31 @@ command -v chroot            # 存在
 
 ## 1. 拿 Alpine minirootfs
 
+**在 PC 上下载，不要试图在手机上直接下载。**
+
+宿主机上没有 `curl`，而 `busybox wget` 编译时没带 HTTPS：
+
 ```sh
-mkdir -p /data/ohc/rootfs/claude /data/local/tmp/dl
-cd /data/local/tmp/dl
+$ command -v curl
+（空）
 
-curl -LO https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.3-aarch64.tar.gz
+$ busybox wget --spider https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/
+wget: bad port 'https'
+```
 
-tar -xzf alpine-minirootfs-3.21.3-aarch64.tar.gz -C /data/ohc/rootfs/claude
-rm -f alpine-minirootfs-3.21.3-aarch64.tar.gz
+所以走 PC 中转：
+
+```powershell
+# PC 上
+curl.exe -LO https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.3-aarch64.tar.gz
+hdc file send .\alpine-minirootfs-3.21.3-aarch64.tar.gz /data/local/tmp/alpine.tar.gz
+```
+
+```sh
+# 手机上
+mkdir -p /data/ohc/rootfs/claude
+tar -xzf /data/local/tmp/alpine.tar.gz -C /data/ohc/rootfs/claude
+rm -f /data/local/tmp/alpine.tar.gz
 ```
 
 验证：
