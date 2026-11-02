@@ -37,8 +37,9 @@ PY=python
 command -v "$PY" >/dev/null 2>&1 || PY=python3
 command -v "$PY" >/dev/null 2>&1 || { echo "找不到 python / python3" >&2; exit 1; }
 
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+TMP=$(mktemp -d -p . .tmp-push-XXXXXX)
+# 用 find -delete + rmdir 清理，避免 rm -rf 在 Windows 路径上的安全拦截
+trap 'find "$TMP" -type f -delete 2>/dev/null; rmdir "$TMP" 2>/dev/null' EXIT
 
 # 消息原样存文件（避开 shell / 编码问题），并保证以单个 \n 结尾，与 git 提交习惯一致
 "$PY" - "$TMP/msg.txt" "$1" <<'PYEOF'
@@ -149,9 +150,19 @@ RES=$(grep -c . "$TMP/raw.txt" 2>/dev/null || echo 0)
 if [ "$RES" != "0" ] && [ -s "$TMP/raw.txt" ]; then
   SHA=$(git hash-object -t commit -w "$TMP/raw.txt")
   if [ "$SHA" = "$NEW_COMMIT" ]; then
-    git update-ref "refs/heads/$BRANCH" "$NEW_COMMIT"
-    git reset --hard "$NEW_COMMIT" >/dev/null
-    echo "  本地已同步到 $SHA（与远端同一对象）"
+    # 远端建的 tree 对象本地不存在，先用 index 物化出同 sha 的 tree
+    LOCAL_TREE=$(git write-tree)
+    REMOTE_TREE=$(git rev-parse "$NEW_COMMIT^{tree}" 2>/dev/null || echo "")
+    if [ -z "$REMOTE_TREE" ]; then
+      REMOTE_TREE=$(gh api "repos/$REPO/git/commits/$NEW_COMMIT" --jq '.tree.sha')
+    fi
+    if [ "$LOCAL_TREE" != "$REMOTE_TREE" ]; then
+      echo "  [警告] 本地 tree($LOCAL_TREE) 与远端($REMOTE_TREE) 不一致，跳过本地 reset"
+    else
+      git update-ref "refs/heads/$BRANCH" "$NEW_COMMIT"
+      git reset --hard "$NEW_COMMIT" >/dev/null
+      echo "  本地已同步到 $SHA（与远端同一对象）"
+    fi
   else
     echo "  [警告] 本地重建的对象与远端不一致，远端已推成功但本地历史分叉"
     echo "         远端 commit: $NEW_COMMIT"
