@@ -31,13 +31,19 @@ powershell -ExecutionPolicy Bypass -File .\restore.ps1
 2. 核对备份包 SHA256
 3. 确认 `/data` 是否干净（已存在则要求加 `-Force`）
 4. 推送备份包到设备
-5. 在设备上解压（约 550MB，1~3 分钟）
+5. 在设备上解压（约 900MB，1~3 分钟）
 6. 修复执行权限
 7. 清理设备上的临时包
 8. 验证 `claude` 在 PATH 中、能打印版本
 9. 真实调用一次 DeepSeek 验证（不想花 token 加 `-NoTest`）
+10. **用仓库里的最新运行时覆盖**（`bin/*`、`device-bin/*`、`etc/tmux.conf`），
+    保证备份包偏旧也不会把已经修好的问题带回来
+11. **PC 侧收尾**：
+    - `HKCU:\Console\LineWrap = 0` —— 关掉控制台缩放重排。不设这个，
+      点一次最大化就闪退（缓冲区有 9001 行，conhost 重排时 0xc0000409）
+    - 安装 `hdc` 包装（`bin\ohc-profile.ps1`），让 `hdc shell` 走带尺寸同步的启动器
 
-完成后：
+完成后（**先把当前 PowerShell 窗口关掉重开一个**，第 11 步的 PC 侧设置才生效）：
 
 ```powershell
 hdc shell
@@ -47,7 +53,9 @@ claude       # DeepSeek V4.1-Flash（用你自己的 DeepSeek Key）
 opencode     # OpenCode Zen 免费 DeepSeek V4.1-Flash Free
 ```
 
-两个都能直接用。
+两个都能直接用。翻屏直接拖 PowerShell 的滚动条或滚鼠标滚轮
+（claude 用 classic renderer 顺序输出，行会正常进宿主回滚区）；
+想要「断开还能接回同一会话」用 `OHC_TMUX=1 claude`。
 
 ---
 
@@ -55,12 +63,16 @@ opencode     # OpenCode Zen 免费 DeepSeek V4.1-Flash Free
 
 ```
 /data/ohc/
-├── bin/ohc, ohc-claude, ohc-setkey, ohc-verify, oc-setkey   容器运行时与工具
+├── bin/ohc, ohc-claude, ohc-tty, ohc-setkey, ohc-verify, oc-setkey   运行时与工具
 ├── rootfs/claude/          Alpine 3.21.3
 │   ├── Node 22.23.4 + claude 2.1.316 + opencode 1.19.5 + ripgrep
+│   ├── usr/bin/tmux + etc/terminfo              可选：OHC_TMUX=1 时用
+│   ├── usr/local/bin/ohc-tmux                   容器内 tmux 启动器
+│   ├── root/.tmux.conf                          5 万行历史 + alternate-screen off
 │   ├── root/.config/opencode/opencode.json      默认模型（免费 DeepSeek）
 │   └── root/.local/share/opencode/auth.json     OpenCode Key（600 权限）
-├── containers/claude/env   DeepSeek API Key、模型名、上下文窗口等配置
+├── containers/claude/env   DeepSeek Key、模型名、上下文窗口、
+│                           CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1（翻屏关键）
 └── workspace/              claude / opencode 的工作目录（容器内 /work）
 
 /data/python/lib/python3.8/script/bin/claude      PATH 里的 claude 入口
@@ -71,6 +83,9 @@ opencode     # OpenCode Zen 免费 DeepSeek V4.1-Flash Free
 所以哪怕刷机后手机还没连上 WiFi，也能先把环境还原。
 
 **OpenCode 的登录状态也在包里**（`auth.json`），恢复后不需要重新登录。
+
+> 包里**不含** PC 侧的两项设置（`LineWrap=0` 和 `hdc` 包装），
+> 它们由 `restore.ps1` 第 11 步现场写入——所以恢复后一定要重开 PowerShell 窗口。
 
 ---
 

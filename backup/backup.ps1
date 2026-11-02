@@ -65,7 +65,9 @@ OUT=/data/local/tmp/ohc-backup.tar.gz
 R=/data/ohc/rootfs/claude
 rm -f "$OUT"
 rm -rf "$R/var/cache/apk"/* 2>/dev/null
-busybox find "$R" -type s 2>/dev/null | while read -r f; do rm -f "$f"; done
+# socket 不能进 tar（tar 会报 unknown file type '140000'）。除了 rootfs，
+# /work/.tmux 下也有 tmux 的 socket，所以整个 /data/ohc 都扫一遍。
+busybox find /data/ohc /data/python -type s 2>/dev/null | while read -r f; do rm -f "$f"; done
 cd /data
 tar -czf "$OUT" ohc python
 tar -tzf "$OUT" > /data/local/tmp/tl.txt

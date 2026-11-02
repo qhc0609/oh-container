@@ -50,6 +50,20 @@ function Write-Ok($m)   { Write-Host "    [OK] $m" -ForegroundColor Green }
 function Write-Warn2($m){ Write-Host "    [!]  $m" -ForegroundColor Yellow }
 function Fail($m)       { Write-Host "`n[失败] $m" -ForegroundColor Red; exit 1 }
 
+# hdc file send 的两个坑：目标是已存在的文件会报 "Not a directory"，
+# 目标不存在则会建一个同名**目录**。统一走「发到父目录 + 改名」。
+function Push-File([string]$Local, [string]$RemoteDir, [string]$RemoteName) {
+    if (-not (Test-Path $Local)) { return $false }
+    $base = Split-Path $Local -Leaf
+    & $Hdc shell "mkdir -p '$RemoteDir'" | Out-Null
+    $out = (& $Hdc file send $Local "$RemoteDir/" 2>&1) -join "`n"
+    if ($out -notmatch 'finish') { Write-Warn2 "推送失败 $Local : $out"; return $false }
+    if ($base -ne $RemoteName) {
+        & $Hdc shell "mv -f '$RemoteDir/$base' '$RemoteDir/$RemoteName'" | Out-Null
+    }
+    return $true
+}
+
 # ------------------------------------------------------------------ 0. 定位 hdc
 Write-Step "检查 hdc"
 if (-not $Hdc) {
@@ -183,6 +197,64 @@ if (-not $NoTest) {
 
 & $Hdc shell "rm -f /data/local/tmp/ohc-restore-device.sh" | Out-Null
 
+# ------------------------------------------------------------------ 8. 用仓库里的最新运行时覆盖
+# 备份包可能是几天前打的，而运行时（翻屏、防崩、尺寸同步）一直在改。
+# 这里把仓库里的版本再推一遍，保证「恢复出来的就是最新那一版」。
+$repoRoot = Split-Path $PSScriptRoot -Parent
+if (Test-Path (Join-Path $repoRoot "bin\ohc-tty")) {
+    Write-Step "同步仓库里的最新运行时"
+    foreach ($f in @("ohc", "ohc-claude", "ohc-tty", "ohc-setkey", "oc-setkey", "ohc-verify")) {
+        $null = Push-File (Join-Path $repoRoot "bin\$f") "/data/ohc/bin" $f
+    }
+    & $Hdc shell "chmod 755 /data/ohc/bin/ohc /data/ohc/bin/ohc-claude /data/ohc/bin/ohc-tty /data/ohc/bin/ohc-setkey /data/ohc/bin/oc-setkey /data/ohc/bin/ohc-verify 2>/dev/null" | Out-Null
+
+    foreach ($f in @("claude", "opencode")) {
+        $null = Push-File (Join-Path $repoRoot "device-bin\$f") "/data/python/lib/python3.8/script/bin" $f
+        & $Hdc shell "chmod 755 /data/python/lib/python3.8/script/bin/$f 2>/dev/null" | Out-Null
+    }
+
+    $null = Push-File (Join-Path $repoRoot "etc\tmux.conf") "/data/ohc/rootfs/claude/root" ".tmux.conf"
+    Write-Ok "运行时已更新到仓库版本"
+} else {
+    Write-Warn2 "没找到仓库目录，跳过运行时更新（只用备份包里的版本）"
+}
+
+# ------------------------------------------------------------------ 9. PC 侧收尾
+# 这两件事不在备份包里，但缺了「能翻屏、不闪退」就复现不出来。
+Write-Step "PC 侧设置"
+
+# 9.1 关掉控制台「调整窗口大小时重排文本」。
+# 这台机器的控制台缓冲区是 120x9001；最大化时 conhost 要把 9001 行按 1904 列
+# 重排一遍，claude 的彩色/框线内容正好把它压垮 -> conhost.exe 0xc0000409。
+# 现象：点一次最大化就闪退，而 claude 画面还停在原来的大小。
+try {
+    $lw = (Get-ItemProperty 'HKCU:\Console' -Name LineWrap -ErrorAction SilentlyContinue).LineWrap
+    if ($null -ne $lw -and $lw -ne 0) {
+        Set-ItemProperty 'HKCU:\Console' -Name LineWrap -Value 0 -Type DWord
+        Write-Ok "已关闭控制台缩放重排（LineWrap=0，新开的窗口才生效）"
+    } else {
+        Write-Ok "控制台缩放重排已是关闭状态"
+    }
+} catch {
+    Write-Warn2 ("设置 LineWrap 失败：" + $_.Exception.Message)
+}
+
+# 9.2 装 hdc 包装：让 `hdc shell` 走带尺寸同步的启动器，
+# 否则设备那边永远按 80x24 排版（窗口再大也只用到左上角）。
+$prof = Join-Path $repoRoot "bin\ohc-profile.ps1"
+if (Test-Path $prof) {
+    try {
+        # 用子进程跑：ohc-profile.ps1 里若有 exit，不会把本脚本一起终止
+        $psExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+        $null = & $psExe -NoProfile -ExecutionPolicy Bypass -File $prof 2>&1
+        Write-Ok "已安装 hdc 包装（新开窗口生效）"
+    } catch {
+        Write-Warn2 ("安装 hdc 包装失败：" + $_.Exception.Message)
+    }
+} else {
+    Write-Warn2 "没找到 bin\ohc-profile.ps1，跳过 hdc 包装"
+}
+
 # ------------------------------------------------------------------ 完成
 Write-Host ""
 Write-Host "===============================================" -ForegroundColor Green
@@ -190,10 +262,14 @@ Write-Host " 恢复完成" -ForegroundColor Green
 Write-Host "===============================================" -ForegroundColor Green
 Write-Host @"
 
-用法：
+用法（**先关掉当前 PowerShell，重新开一个**，PC 侧设置才生效）：
   hdc shell
   claude                 # DeepSeek V4.1-Flash（你自己的 DeepSeek Key）
   opencode               # OpenCode Zen 免费 DeepSeek V4.1-Flash Free
+
+翻屏：
+  直接拖 PowerShell 的滚动条 / 滚鼠标滚轮（claude 用 classic renderer 顺序输出）
+  想要会话续接：OHC_TMUX=1 claude   （Ctrl+B [ 翻页，q 退出）
 
 其它：
   claude -p "你好"                    # 单次提问
@@ -205,4 +281,5 @@ Write-Host @"
 
 说明：
   容器内工作目录是 /work，对应设备上的 /data/ohc/workspace
+  窗口缩放闪退已修：HKCU:\Console\LineWrap=0（想还原就改回 1）
 "@ -ForegroundColor Gray
